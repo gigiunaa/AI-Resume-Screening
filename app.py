@@ -18,6 +18,77 @@ def home():
     return jsonify({'service': 'Resume Screener', 'status': 'running'}), 200
 
 
+@app.route('/test-status', methods=['POST'])
+def test_status():
+    """
+    სტატუსის ცვლილების ტესტი — გამოიყენე debug-ისთვის
+    POST /test-status {"candidate_id": "123", "status": "Rejected"}
+    """
+    try:
+        data = request.json or {}
+        cid = data.get('candidate_id')
+        status = data.get('status', 'Rejected')
+
+        if not cid:
+            return jsonify({'error': 'candidate_id required'}), 400
+
+        print(f"\n{'='*60}")
+        print(f"[TEST] Testing status change for {cid} -> {status}")
+
+        # 1. მიმდინარე სტატუსის წაკითხვა
+        candidate = zoho_api.get_candidate(cid)
+        current = candidate.get('Candidate_Status', 'Unknown')
+        print(f"[TEST] Current status: {current}")
+
+        # 2. მეთოდი 1: ჩვეულებრივი update
+        print(f"\n[TEST] --- Method 1: Direct field update ---")
+        success1, detail1 = zoho_api._update_record(cid, {
+            'Candidate_Status': status
+        })
+
+        # 3. წაკითხვა ისევ
+        candidate2 = zoho_api.get_candidate(cid)
+        after1 = candidate2.get('Candidate_Status', 'Unknown')
+        print(f"[TEST] After method 1: {after1}")
+
+        # 4. თუ არ იმუშავა, მეთოდი 2
+        if after1 != status:
+            print(f"\n[TEST] --- Method 2: Action endpoint ---")
+            success2 = zoho_api._change_status_via_action(cid, status)
+
+            candidate3 = zoho_api.get_candidate(cid)
+            after2 = candidate3.get('Candidate_Status', 'Unknown')
+            print(f"[TEST] After method 2: {after2}")
+        else:
+            success2 = None
+            after2 = after1
+
+        final = after2
+        worked = (final == status)
+
+        result = {
+            'candidate_id': cid,
+            'requested_status': status,
+            'original_status': current,
+            'method_1_success': success1,
+            'method_1_detail': detail1,
+            'status_after_method_1': after1,
+            'method_2_tried': success2 is not None,
+            'method_2_success': success2,
+            'final_status': final,
+            'status_changed': worked
+        }
+
+        print(f"\n[TEST] RESULT: {'✅ WORKED' if worked else '❌ FAILED'}")
+        print(f"{'='*60}\n")
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"[TEST ERROR] {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/screen', methods=['POST'])
 def screen():
     try:
@@ -100,7 +171,6 @@ English Level: {candidate.get('English_Level', 'N/A')}"""
         jd_text, icp_text = zoho_api.get_job_documents(jid)
         print(f"[5] JD: {'yes' if jd_text else 'no'} | ICP: {'yes' if icp_text else 'no'}")
 
-        # Optional fallback to job description field
         if not jd_text:
             jd_text = job.get('Job_Description', '')
             print(f"[5] Fallback: using Job_Description field ({len(jd_text) if jd_text else 0} chars)")
@@ -115,8 +185,9 @@ English Level: {candidate.get('English_Level', 'N/A')}"""
             candidate_info=candidate
         )
         print(f"[6] Score: {score_val}%")
+        print(f"[6] Assessment: {assessment}")
 
-        # 7. Apply new business logic
+        # 7. Apply result — ახალი გაუმჯობესებული ლოგიკა
         print("[7] Applying screening result...")
         status_changed_to = zoho_api.apply_screening_result(cid, score_val, assessment)
 
@@ -128,6 +199,7 @@ English Level: {candidate.get('English_Level', 'N/A')}"""
             'score': score_val,
             'assessment': assessment,
             'status': final_status,
+            'status_changed': status_changed_to is not None,
             'auto_rejected_by_country': False
         }
 
