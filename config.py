@@ -13,5 +13,28 @@ ZOHO_ACCOUNTS_URL = 'https://accounts.zoho.com/oauth/v2/token'
 # OpenAI
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-# Screening Settings
-REJECT_THRESHOLD = 50
+# Score thresholds
+REJECT_THRESHOLD = 30
+SAVE_FOR_FUTURE_THRESHOLD = 80
+
+# Exact Zoho Recruit Candidate_Status values
+STATUS_REJECTED = "Rejected"
+STATUS_SAVE_FOR_FUTURE = "Saved for the future - applied"
+STATUS_ASSOCIATED = "Associated"
+
+# Countries to auto-reject immediately
+AUTO_REJECT_COUNTRIES = {
+    "india",
+    "pakistan",
+    "nigeria",
+    "kenya",
+    "ghana",
+    "south africa",
+    "uganda",
+    "tanzania",
+    "ethiopia",
+    "egypt",
+    "algeria",
+    "morocco",
+    "tunisia",
+}
