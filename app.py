@@ -20,10 +20,6 @@ def home():
 
 @app.route('/test-status', methods=['POST'])
 def test_status():
-    """
-    სტატუსის ცვლილების ტესტი — გამოიყენე debug-ისთვის
-    POST /test-status {"candidate_id": "123", "status": "Rejected"}
-    """
     try:
         data = request.json or {}
         cid = data.get('candidate_id')
@@ -33,53 +29,42 @@ def test_status():
             return jsonify({'error': 'candidate_id required'}), 400
 
         print(f"\n{'='*60}")
-        print(f"[TEST] Testing status change for {cid} -> {status}")
+        print(f"[TEST] Testing status change: {cid} -> {status}")
 
-        # 1. მიმდინარე სტატუსის წაკითხვა
+        # მიმდინარე სტატუსი
         candidate = zoho_api.get_candidate(cid)
-        current = candidate.get('Candidate_Status', 'Unknown')
-        print(f"[TEST] Current status: {current}")
+        original = candidate.get('Candidate_Status', 'Unknown')
 
-        # 2. მეთოდი 1: ჩვეულებრივი update
-        print(f"\n[TEST] --- Method 1: Direct field update ---")
-        success1, detail1 = zoho_api._update_record(cid, {
-            'Candidate_Status': status
-        })
+        # Blueprint transitions-ის ჩვენება
+        blueprint, transitions = zoho_api._get_blueprint_transitions(cid)
 
-        # 3. წაკითხვა ისევ
+        transitions_info = []
+        for t in transitions:
+            transitions_info.append({
+                'id': t.get('id'),
+                'name': t.get('name'),
+                'next_field_value': t.get('next_field_value', 'N/A')
+            })
+
+        # Blueprint-ით ცვლილება
+        bp_success = zoho_api._change_status_via_blueprint(cid, status)
+
+        # ვერიფიკაცია
         candidate2 = zoho_api.get_candidate(cid)
-        after1 = candidate2.get('Candidate_Status', 'Unknown')
-        print(f"[TEST] After method 1: {after1}")
-
-        # 4. თუ არ იმუშავა, მეთოდი 2
-        if after1 != status:
-            print(f"\n[TEST] --- Method 2: Action endpoint ---")
-            success2 = zoho_api._change_status_via_action(cid, status)
-
-            candidate3 = zoho_api.get_candidate(cid)
-            after2 = candidate3.get('Candidate_Status', 'Unknown')
-            print(f"[TEST] After method 2: {after2}")
-        else:
-            success2 = None
-            after2 = after1
-
-        final = after2
-        worked = (final == status)
+        final = candidate2.get('Candidate_Status', 'Unknown')
 
         result = {
             'candidate_id': cid,
+            'original_status': original,
             'requested_status': status,
-            'original_status': current,
-            'method_1_success': success1,
-            'method_1_detail': detail1,
-            'status_after_method_1': after1,
-            'method_2_tried': success2 is not None,
-            'method_2_success': success2,
+            'has_blueprint': blueprint is not None,
+            'available_transitions': transitions_info,
+            'blueprint_success': bp_success,
             'final_status': final,
-            'status_changed': worked
+            'status_changed': final == status
         }
 
-        print(f"\n[TEST] RESULT: {'✅ WORKED' if worked else '❌ FAILED'}")
+        print(f"[TEST] Result: {'✅' if final == status else '❌'}")
         print(f"{'='*60}\n")
 
         return jsonify(result), 200
