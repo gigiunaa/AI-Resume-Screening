@@ -107,7 +107,13 @@ English Level: {candidate.get('English_Level', 'N/A')}"""
 
         # 6. AI Score
         print("[6] AI Scoring...")
-        score_val, assessment = openai_service.score(cv_text, jd_text, icp_text, job)
+        score_val, assessment = openai_service.score(
+            cv_text=cv_text,
+            jd_text=jd_text,
+            icp_text=icp_text,
+            job_info=job,
+            candidate_info=candidate
+        )
         print(f"[6] Score: {score_val}%")
 
         # 7. Apply new business logic
