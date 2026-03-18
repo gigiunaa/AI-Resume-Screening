@@ -21,69 +21,112 @@ def home():
 @app.route('/screen', methods=['POST'])
 def screen():
     try:
-        data = request.json
+        data = request.json or {}
         cid = data.get('candidate_id')
         jid = data.get('job_opening_id')
 
-        if not cid or not jid:
-            return jsonify({'error': 'candidate_id and job_opening_id required'}), 400
+        if not cid:
+            return jsonify({'error': 'candidate_id required'}), 400
 
-        print(f"\n{'='*50}")
-        print(f"[START] Candidate: {cid} | Job: {jid}")
+        print(f"\n{'='*60}")
+        print(f"[START] Candidate: {cid} | Incoming Job: {jid}")
 
         # 1. Candidate
         print("[1] Getting candidate...")
         candidate = zoho_api.get_candidate(cid)
         name = candidate.get('Full_Name', 'Unknown')
-        print(f"[1] {name}")
+        current_status = candidate.get('Candidate_Status', 'Unknown')
+        country_raw = candidate.get('Country', '')
+        country = (country_raw or '').strip().lower()
 
-        # 2. CV
-        print("[2] Downloading CV...")
+        print(f"[1] Candidate: {name}")
+        print(f"[1] Current status: {current_status}")
+        print(f"[1] Country: {country_raw}")
+
+        # 2. Auto-reject by country
+        if country in config.AUTO_REJECT_COUNTRIES:
+            print("[2] Country matched auto-reject list")
+            assessment = "Candidate was automatically filtered out based on predefined geographic screening criteria."
+            final_status = zoho_api.auto_reject_candidate(cid, assessment)
+
+            result = {
+                'candidate': name,
+                'job': None,
+                'score': 0,
+                'assessment': assessment,
+                'status': final_status,
+                'auto_rejected_by_country': True,
+                'country': country_raw
+            }
+
+            print(f"[DONE] {name} -> AUTO REJECT by country -> {country_raw}")
+            print(f"{'='*60}\n")
+            return jsonify(result), 200
+
+        # 3. Job Opening
+        if not jid:
+            print("[3] No job_opening_id from webhook, finding associated job...")
+            associated_job = zoho_api.get_associated_job(cid)
+            if not associated_job:
+                return jsonify({'error': 'No associated job opening found'}), 400
+            jid = associated_job.get('id')
+
+        print(f"[3] Getting job opening {jid}...")
+        job = zoho_api.get_job_opening(jid)
+        job_title = job.get('Posting_Title', 'Unknown')
+        print(f"[3] Job: {job_title}")
+
+        # 4. CV
+        print("[4] Downloading CV...")
         cv_content, cv_filename = zoho_api.get_candidate_cv(cid)
         cv_text = None
+
         if cv_content:
             cv_text = file_parser.extract_text(cv_content, cv_filename)
-            print(f"[2] CV parsed: {len(cv_text)} chars")
+            print(f"[4] CV parsed: {len(cv_text) if cv_text else 0} chars")
         else:
             cv_text = f"""Name: {name}
 Skills: {candidate.get('Skill_Set', 'N/A')}
 Title: {candidate.get('Current_Job_Title', 'N/A')}
 Experience: {candidate.get('Experience_in_Years', 'N/A')} years
 Employer: {candidate.get('Current_Employer', 'N/A')}
-Education: {candidate.get('Highest_Qualification', 'N/A')}"""
-            print("[2] No CV file, using Zoho parsed fields")
+Education: {candidate.get('Highest_Qualification', 'N/A')}
+Country: {candidate.get('Country', 'N/A')}
+English Level: {candidate.get('English_Level', 'N/A')}"""
+            print("[4] No CV file, using Zoho parsed fields")
 
-        # 3. Job Opening
-        print("[3] Getting job opening...")
-        job = zoho_api.get_job_opening(jid)
-        print(f"[3] Job: {job.get('Posting_Title', 'Unknown')}")
-
-        # 4. JD/ICP
-        print("[4] Downloading JD/ICP...")
+        # 5. JD / ICP
+        print("[5] Downloading JD/ICP...")
         jd_text, icp_text = zoho_api.get_job_documents(jid)
-        print(f"[4] JD: {'yes' if jd_text else 'no'} | ICP: {'yes' if icp_text else 'no'}")
+        print(f"[5] JD: {'yes' if jd_text else 'no'} | ICP: {'yes' if icp_text else 'no'}")
 
-        # 5. AI Score
-        print("[5] AI Scoring...")
+        # Optional fallback to job description field
+        if not jd_text:
+            jd_text = job.get('Job_Description', '')
+            print(f"[5] Fallback: using Job_Description field ({len(jd_text) if jd_text else 0} chars)")
+
+        # 6. AI Score
+        print("[6] AI Scoring...")
         score_val, assessment = openai_service.score(cv_text, jd_text, icp_text, job)
-        print(f"[5] Score: {score_val}%")
+        print(f"[6] Score: {score_val}%")
 
-        # 6. Update Zoho
-        print("[6] Updating Zoho...")
-        zoho_api.update_candidate(cid, score_val, assessment)
+        # 7. Apply new business logic
+        print("[7] Applying screening result...")
+        status_changed_to = zoho_api.apply_screening_result(cid, score_val, assessment)
 
-        status = 'Rejected' if score_val < config.REJECT_THRESHOLD else 'Active'
+        final_status = status_changed_to if status_changed_to else current_status
 
         result = {
             'candidate': name,
-            'job': job.get('Posting_Title'),
+            'job': job_title,
             'score': score_val,
             'assessment': assessment,
-            'status': status
+            'status': final_status,
+            'auto_rejected_by_country': False
         }
 
-        print(f"\n[DONE] {name} -> {score_val}% -> {status}")
-        print(f"{'='*50}\n")
+        print(f"[DONE] {name} -> {score_val}% -> {final_status}")
+        print(f"{'='*60}\n")
 
         return jsonify(result), 200
 
