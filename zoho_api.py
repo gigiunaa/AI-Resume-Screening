@@ -31,11 +31,22 @@ def get_attachments(module, record_id):
 
 
 def download_attachment(module, record_id, att_id):
-    r = requests.get(
-        f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}",
-        headers=_h()
-    )
-    r.raise_for_status()
+    """ატაჩმენტის ჩამოტვირთვა"""
+    url = f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}"
+    print(f"[Zoho] Downloading attachment: {url}")
+    
+    r = requests.get(url, headers=_h())
+    
+    # თუ 400 error - სცადე $download endpoint
+    if r.status_code == 400:
+        url2 = f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}/$download"
+        print(f"[Zoho] Trying alternative URL: {url2}")
+        r = requests.get(url2, headers=_h())
+    
+    if r.status_code != 200:
+        print(f"[Zoho] Attachment download failed: {r.status_code} - {r.text}")
+        return None
+    
     return r.content
 
 
