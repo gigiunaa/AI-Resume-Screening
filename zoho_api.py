@@ -21,11 +21,10 @@ def get_job_opening(jid):
 
 def get_associated_job(cid):
     """
-    ✅ იპოვის Job Opening ID-ს რომელზეც Associated არის კანდიდატი
+    იპოვის Job Opening ID-ს რომელზეც Associated არის კანდიდატი
     """
     candidate = get_candidate(cid)
     
-    # მეთოდი 1: Latest_Job_Opening ველიდან
     job_name = candidate.get('Latest_Job_Opening')
     if job_name:
         try:
@@ -72,16 +71,194 @@ def download_attachment(module, record_id, att_id):
     return None
 
 
-def get_candidate_cv(cid):
+def get_candidate_documents(cid):
+    """
+    კანდიდატის ყველა დოკუმენტის ჩამოტვირთვა და გაერთიანება.
+    
+    აბრუნებს:
+        - resume_text: მთავარი CV/Resume ტექსტი
+        - all_documents_text: ყველა დოკუმენტის გაერთიანებული ტექსტი
+        - filenames: ფაილების სახელები
+    """
+    from file_parser import extract_text
+    
     attachments = get_attachments("Candidates", cid)
-
+    
+    if not attachments:
+        print(f"[Zoho] No attachments for candidate {cid}")
+        return None, None, None
+    
+    print(f"[Zoho] Found {len(attachments)} attachments")
+    
+    # კატეგორიზაცია
+    documents = {
+        'resume': [],
+        'cover_letter': [],
+        'portfolio': [],
+        'certificate': [],
+        'other': []
+    }
+    
     for att in attachments:
         fname = att.get('File_Name', '').lower()
-        if any(ext in fname for ext in ['.pdf', '.docx', '.doc']):
+        category = (att.get('Category') or '').lower().strip()
+        
+        print(f"[Zoho]   📎 {att['File_Name']} (Category: {category or 'N/A'})")
+        
+        # მხოლოდ ტექსტური ფაილები
+        if not any(ext in fname for ext in ['.pdf', '.docx', '.doc', '.txt', '.rtf']):
+            print(f"[Zoho]     ⏭️ Skipping (not a document)")
+            continue
+        
+        # კატეგორიზება პრიორიტეტით
+        if category == 'resume' or 'resume' in fname or 'cv' in fname:
+            documents['resume'].append(att)
+        elif category == 'cover letter' or 'cover' in fname or 'letter' in fname:
+            documents['cover_letter'].append(att)
+        elif 'portfolio' in fname or category == 'portfolio':
+            documents['portfolio'].append(att)
+        elif 'certificate' in fname or 'cert' in fname or 'diploma' in fname or 'license' in fname:
+            documents['certificate'].append(att)
+        else:
+            documents['other'].append(att)
+    
+    # ტექსტების შეგროვება სტრუქტურირებულად
+    all_texts = []
+    resume_text = None
+    all_filenames = []
+    
+    # 1. RESUME (მთავარი დოკუმენტი)
+    if documents['resume']:
+        print(f"\n[Zoho] 📄 Processing RESUME files...")
+        for att in documents['resume'][:2]:  # მაქს 2 resume
             content = download_attachment("Candidates", cid, att['id'])
             if content:
-                return content, att['File_Name']
+                text = extract_text(content, att['File_Name'])
+                if text and len(text) > 100:
+                    section = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  📄 RESUME: {att['File_Name'][:60]}
+╚══════════════════════════════════════════════════════════════════════════════╝
 
+{text}
+"""
+                    all_texts.append(section)
+                    all_filenames.append(att['File_Name'])
+                    
+                    # პირველი resume მთავარია
+                    if resume_text is None:
+                        resume_text = text
+                    
+                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+    
+    # 2. COVER LETTER
+    if documents['cover_letter']:
+        print(f"\n[Zoho] 💌 Processing COVER LETTER files...")
+        for att in documents['cover_letter'][:1]:  # მაქს 1
+            content = download_attachment("Candidates", cid, att['id'])
+            if content:
+                text = extract_text(content, att['File_Name'])
+                if text and len(text) > 100:
+                    section = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  💌 COVER LETTER: {att['File_Name'][:55]}
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+{text}
+"""
+                    all_texts.append(section)
+                    all_filenames.append(att['File_Name'])
+                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+    
+    # 3. PORTFOLIO
+    if documents['portfolio']:
+        print(f"\n[Zoho] 🎨 Processing PORTFOLIO files...")
+        for att in documents['portfolio'][:1]:  # მაქს 1
+            content = download_attachment("Candidates", cid, att['id'])
+            if content:
+                text = extract_text(content, att['File_Name'])
+                if text and len(text) > 100:
+                    section = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  🎨 PORTFOLIO: {att['File_Name'][:57]}
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+{text}
+"""
+                    all_texts.append(section)
+                    all_filenames.append(att['File_Name'])
+                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+    
+    # 4. CERTIFICATES (მნიშვნელოვანია შეფასებისთვის!)
+    if documents['certificate']:
+        print(f"\n[Zoho] 🏆 Processing CERTIFICATE files...")
+        cert_texts = []
+        for att in documents['certificate'][:3]:  # მაქს 3 სერტიფიკატი
+            content = download_attachment("Candidates", cid, att['id'])
+            if content:
+                text = extract_text(content, att['File_Name'])
+                if text and len(text) > 20:  # სერტიფიკატები შეიძლება მოკლე იყოს
+                    cert_texts.append(f"• {att['File_Name']}:\n{text[:500]}")  # მაქს 500 სიმბოლო თითოზე
+                    all_filenames.append(att['File_Name'])
+                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+        
+        if cert_texts:
+            section = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  🏆 CERTIFICATES & CREDENTIALS
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+{chr(10).join(cert_texts)}
+"""
+            all_texts.append(section)
+    
+    # 5. OTHER DOCUMENTS (თუ resume არ არის, შეიძლება სხვა ფაილში იყოს ინფო)
+    if documents['other']:
+        print(f"\n[Zoho] 📁 Processing OTHER files...")
+        for att in documents['other'][:2]:  # მაქს 2
+            content = download_attachment("Candidates", cid, att['id'])
+            if content:
+                text = extract_text(content, att['File_Name'])
+                if text and len(text) > 200:  # მხოლოდ შინაარსიანი ფაილები
+                    section = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  📁 ADDITIONAL DOCUMENT: {att['File_Name'][:48]}
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+{text}
+"""
+                    all_texts.append(section)
+                    all_filenames.append(att['File_Name'])
+                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+    
+    # შედეგების დაბრუნება
+    if all_texts:
+        combined_text = "\n".join(all_texts)
+        combined_filenames = " | ".join(all_filenames)
+        
+        print(f"\n[Zoho] ════════════════════════════════════════════════════════")
+        print(f"[Zoho] 📊 SUMMARY: Combined {len(all_texts)} documents")
+        print(f"[Zoho] 📊 Total text: {len(combined_text)} characters")
+        print(f"[Zoho] 📊 Files: {combined_filenames}")
+        print(f"[Zoho] ════════════════════════════════════════════════════════\n")
+        
+        return resume_text, combined_text, combined_filenames
+    
+    print(f"[Zoho] ❌ No parseable documents found for candidate {cid}")
+    return None, None, None
+
+
+def get_candidate_cv(cid):
+    """
+    კანდიდატის CV ტექსტის მიღება (compatibility wrapper)
+    აბრუნებს: (combined_text, filenames)
+    """
+    resume_text, all_docs_text, filenames = get_candidate_documents(cid)
+    
+    # ვაბრუნებთ გაერთიანებულ ტექსტს რათა AI-მ ყველაფერი დაინახოს
+    if all_docs_text:
+        return all_docs_text, filenames
+    
     return None, None
 
 
@@ -103,9 +280,9 @@ def get_job_documents(jid):
         if not text:
             continue
 
-        if 'jd' in fname or 'job' in fname:
+        if 'jd' in fname or 'job' in fname or 'description' in fname:
             jd_text = text
-        elif 'icp' in fname or 'ideal' in fname:
+        elif 'icp' in fname or 'ideal' in fname or 'profile' in fname:
             icp_text = text
         elif not jd_text:
             jd_text = text
@@ -126,20 +303,13 @@ def update_candidate_fields(cid, data):
 
 def update_candidate_status(cid, jid, status_value):
     """
-    ✅ Candidate_Status-ის შეცვლა jobids-ით
-    
-    Args:
-        cid: Candidate ID
-        jid: Job Opening ID (can be None for non-Associated candidates)
-        status_value: New status
+    Candidate_Status-ის შეცვლა jobids-ით
     """
     if not jid:
-        # ვეძებთ associated job-ს
         print("[Zoho] No job_opening_id provided, trying to find it...")
         jid = get_associated_job(cid)
     
     if jid:
-        # ✅ Associated candidate - use jobids
         payload = {
             'data': [{
                 'ids': [str(cid)],
@@ -155,7 +325,7 @@ def update_candidate_status(cid, jid, status_value):
             timeout=30
         )
         
-        print(f"[Zoho] Status update (with jobids): {r.status_code}")
+        print(f"[Zoho] Status update: {r.status_code}")
         
         if r.status_code == 200:
             result = r.json().get('data', [{}])[0]
@@ -164,47 +334,32 @@ def update_candidate_status(cid, jid, status_value):
                 return True
             else:
                 print(f"[Zoho] ❌ {result.get('message')}")
-        else:
-            print(f"[Zoho] ❌ HTTP {r.status_code}: {r.text}")
         
         return False
     
     else:
-        # Fallback: direct field update (for non-Associated)
         print("[Zoho] No job found, trying direct update...")
-        
-        payload = {'Candidate_Status': status_value}
         
         r = requests.put(
             f"{config.ZOHO_RECRUIT_BASE}/Candidates/{cid}",
             headers={**_h(), 'Content-Type': 'application/json'},
-            json={'data': [payload]},
+            json={'data': [{'Candidate_Status': status_value}]},
             timeout=30
         )
         
-        print(f"[Zoho] Direct status update: {r.status_code}")
-        print(f"[Zoho] Response: {r.text}")
-        
+        print(f"[Zoho] Direct update: {r.status_code}")
         return r.status_code == 200
 
 
 def apply_screening_result(cid, jid, score, assessment):
     """
-    ✅ Score + Assessment შენახვა და სტატუსის ცვლილება
-    
-    Args:
-        cid: Candidate ID
-        jid: Job Opening ID (can be None)
-        score: AI score
-        assessment: AI assessment text
+    Score + Assessment შენახვა და სტატუსის ცვლილება
     """
-    # ყოველთვის ვინახავთ score + assessment
     update_candidate_fields(cid, {
         'AI_Score': int(score),
-        'AI_Assessment': assessment
+        'AI_Assessment': assessment[:5000]  # Zoho field limit
     })
 
-    # სტატუსის ლოგიკა
     if score < config.REJECT_THRESHOLD:
         print(f"[Zoho] Score {score} < {config.REJECT_THRESHOLD} -> REJECTING")
         update_candidate_status(cid, jid, config.STATUS_REJECTED)
@@ -215,20 +370,12 @@ def apply_screening_result(cid, jid, score, assessment):
         update_candidate_status(cid, jid, config.STATUS_SAVE_FOR_FUTURE)
         return config.STATUS_SAVE_FOR_FUTURE
 
-    # 80+ -> სტატუსი არ იცვლება
     print(f"[Zoho] Score {score} >= {config.SAVE_FOR_FUTURE_THRESHOLD} -> keeping status")
     return None
 
 
 def auto_reject_candidate(cid, jid, assessment):
-    """
-    ✅ ქვეყნის მიხედვით ავტო-reject
-    
-    Args:
-        cid: Candidate ID
-        jid: Job Opening ID (can be None)
-        assessment: Rejection reason
-    """
+    """ქვეყნის მიხედვით ავტო-reject"""
     update_candidate_fields(cid, {
         'AI_Score': 0,
         'AI_Assessment': assessment
