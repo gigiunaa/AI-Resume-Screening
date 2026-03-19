@@ -43,11 +43,10 @@ def screen():
         print(f"[1] Status: {current_status}")
         print(f"[1] Country: {country_raw}")
 
-        # 2. Find Job Opening ID if not provided
+        # 2. Find Job Opening ID
         if not jid:
-            print("[2] No job_opening_id, finding associated job...")
+            print("[2] Finding associated job...")
             jid = zoho_api.get_associated_job(cid)
-            
             if jid:
                 print(f"[2] ✅ Found: {jid}")
             else:
@@ -55,25 +54,21 @@ def screen():
 
         # 3. Auto-reject by country
         if country in config.AUTO_REJECT_COUNTRIES:
-            print(f"[3] Auto-reject: {country_raw}")
+            print(f"[3] ❌ Auto-reject by country: {country_raw}")
             assessment = f"Automatically rejected: candidate location ({country_raw}) is outside target geography."
-            
-            # ✅ jid გადაეცემა
             final_status = zoho_api.auto_reject_candidate(cid, jid, assessment)
 
-            result = {
-                'candidate': name,
-                'job': None,
-                'score': 0,
-                'assessment': assessment,
-                'status': final_status,
-                'auto_rejected_by_country': True,
-                'country': country_raw
-            }
-
-            print(f"[DONE] AUTO-REJECT by country")
-            print(f"{'='*60}\n")
-            return jsonify({'status': 'success', 'data': result}), 200
+            return jsonify({
+                'status': 'success',
+                'data': {
+                    'candidate': name,
+                    'job': None,
+                    'score': 0,
+                    'assessment': assessment,
+                    'status': final_status,
+                    'rejection_reason': 'country'
+                }
+            }), 200
 
         # 4. Get Job Opening
         if not jid:
@@ -86,30 +81,49 @@ def screen():
 
         # 5. Get CV
         print("[5] Downloading CV...")
-        cv_content, cv_filename = zoho_api.get_candidate_cv(cid)
+        cv_text, cv_filenames = zoho_api.get_candidate_cv(cid)
         
-        if cv_content:
-            cv_text = file_parser.extract_text(cv_content, cv_filename)
-            print(f"[5] CV: {len(cv_text) if cv_text else 0} chars")
-        else:
-            cv_text = f"""Name: {name}
-Skills: {candidate.get('Skill_Set', 'N/A')}
-Experience: {candidate.get('Experience_in_Years', 'N/A')} years
-Education: {candidate.get('Highest_Qualification_Held', 'N/A')}
-English: {candidate.get('English_Level', 'N/A')}"""
-            print("[5] No CV, using Zoho fields")
+        # 6. ენის შემოწმება - CV უნდა იყოს მხოლოდ ინგლისურად!
+        if cv_text:
+            print(f"[6] Checking CV language...")
+            is_english, detected_lang = file_parser.is_english_cv(cv_text)
+            
+            if not is_english:
+                print(f"[6] ❌ Auto-reject: CV is in {detected_lang}")
+                
+                assessment = f"Automatically rejected: CV/Resume is written in {detected_lang}. Only English CVs are accepted for evaluation."
+                final_status = zoho_api.auto_reject_candidate(cid, jid, assessment)
 
-        # 6. Get JD/ICP
-        print("[6] Downloading JD/ICP...")
+                return jsonify({
+                    'status': 'success',
+                    'data': {
+                        'candidate': name,
+                        'job': job_title,
+                        'score': 0,
+                        'assessment': assessment,
+                        'status': final_status,
+                        'rejection_reason': 'cv_language',
+                        'detected_language': detected_lang
+                    }
+                }), 200
+            
+            print(f"[6] ✅ CV language OK: {detected_lang}")
+        else:
+            # CV არ არის - გავაგრძელოთ ATS data-ით
+            print("[6] ⚠️ No CV found, using ATS data only")
+            cv_text = _build_fallback_cv(candidate)
+
+        # 7. Get JD/ICP
+        print("[7] Downloading JD/ICP...")
         jd_text, icp_text = zoho_api.get_job_documents(jid)
         
         if not jd_text:
             jd_text = job.get('Job_Description', '')
         
-        print(f"[6] JD: {len(jd_text) if jd_text else 0} | ICP: {len(icp_text) if icp_text else 0}")
+        print(f"[7] JD: {len(jd_text) if jd_text else 0} chars | ICP: {len(icp_text) if icp_text else 0} chars")
 
-        # 7. AI Scoring
-        print("[7] AI Scoring...")
+        # 8. AI Scoring
+        print("[8] AI Scoring...")
         score_val, assessment = openai_service.score(
             cv_text=cv_text,
             jd_text=jd_text,
@@ -117,22 +131,20 @@ English: {candidate.get('English_Level', 'N/A')}"""
             job_info=job,
             candidate_info=candidate
         )
-        print(f"[7] Score: {score_val}%")
+        print(f"[8] Score: {score_val}%")
 
-        # 8. Apply Result
-        print("[8] Applying result...")
-        # ✅ jid გადაეცემა
+        # 9. Apply Result
+        print("[9] Applying result...")
         status_changed_to = zoho_api.apply_screening_result(cid, jid, score_val, assessment)
-
         final_status = status_changed_to if status_changed_to else current_status
 
         result = {
             'candidate': name,
             'job': job_title,
             'score': score_val,
-            'assessment': assessment[:1000],
+            'assessment': assessment[:2000],
             'status': final_status,
-            'auto_rejected_by_country': False
+            'rejection_reason': None
         }
 
         print(f"[DONE] {name} -> {score_val}% -> {final_status}")
@@ -143,6 +155,23 @@ English: {candidate.get('English_Level', 'N/A')}"""
     except Exception as e:
         print(f"[ERROR] {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
+
+
+def _build_fallback_cv(candidate):
+    """ATS data-დან CV-ის აგება თუ ფაილი არ არის"""
+    return f"""Candidate Profile:
+
+Name: {candidate.get('Full_Name', 'N/A')}
+Current Title: {candidate.get('Current_Job_Title', 'N/A')}
+Experience: {candidate.get('Experience_in_Years', 'N/A')} years
+Skills: {candidate.get('Skill_Set', 'N/A')}
+Education: {candidate.get('Highest_Qualification_Held', 'N/A')}
+English Level: {candidate.get('English_Level', 'N/A')}
+Country: {candidate.get('Country', 'N/A')}
+
+Professional Summary:
+{candidate.get('Professional_Sumarry', 'N/A')}
+"""
 
 
 if __name__ == '__main__':
