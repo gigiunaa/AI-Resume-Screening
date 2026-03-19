@@ -20,18 +20,28 @@ def get_job_opening(jid):
 
 
 def get_associated_job(cid):
-    r = requests.get(
-        f"{config.ZOHO_RECRUIT_BASE}/Candidates/{cid}/associate",
-        headers=_h()
-    )
-
-    if r.status_code != 200:
-        print(f"[Zoho] No associated job: {r.status_code} - {r.text}")
-        return None
-
-    data = r.json()
-    if 'data' in data and len(data['data']) > 0:
-        return data['data'][0]
+    """
+    ✅ იპოვის Job Opening ID-ს რომელზეც Associated არის კანდიდატი
+    """
+    candidate = get_candidate(cid)
+    
+    # მეთოდი 1: Latest_Job_Opening ველიდან
+    job_name = candidate.get('Latest_Job_Opening')
+    if job_name:
+        try:
+            r = requests.get(
+                f"{config.ZOHO_RECRUIT_BASE}/Job_Openings/search",
+                headers=_h(),
+                params={"criteria": f"(Posting_Title:equals:{job_name})"}
+            )
+            if r.status_code == 200 and r.json().get('data'):
+                job_id = r.json()['data'][0]['id']
+                print(f"[Zoho] Found associated job: {job_name} (ID: {job_id})")
+                return job_id
+        except Exception as e:
+            print(f"[Zoho] Error finding job by name: {e}")
+    
+    print(f"[Zoho] No associated job found for candidate {cid}")
     return None
 
 
@@ -45,38 +55,20 @@ def get_attachments(module, record_id):
         return []
 
     if r.status_code != 200:
-        print(f"[Zoho] Get attachments failed: {r.status_code} - {r.text}")
+        print(f"[Zoho] Get attachments failed: {r.status_code}")
         return []
 
     return r.json().get('data', [])
 
 
 def download_attachment(module, record_id, att_id):
-    url1 = f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}"
-    print(f"[Zoho] Download attempt 1: {url1}")
-    r = requests.get(url1, headers=_h())
+    url = f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}"
+    r = requests.get(url, headers=_h())
 
     if r.status_code == 200 and len(r.content) > 0:
-        print(f"[Zoho] Download success (method 1): {len(r.content)} bytes")
         return r.content
 
-    url2 = f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}/$download"
-    print(f"[Zoho] Download attempt 2: {url2}")
-    r = requests.get(url2, headers=_h())
-
-    if r.status_code == 200 and len(r.content) > 0:
-        print(f"[Zoho] Download success (method 2): {len(r.content)} bytes")
-        return r.content
-
-    url3 = f"https://recruit.zoho.com/recruit/v2/files/{att_id}"
-    print(f"[Zoho] Download attempt 3: {url3}")
-    r = requests.get(url3, headers=_h())
-
-    if r.status_code == 200 and len(r.content) > 0:
-        print(f"[Zoho] Download success (method 3): {len(r.content)} bytes")
-        return r.content
-
-    print(f"[Zoho] All download methods failed for attachment {att_id}")
+    print(f"[Zoho] Failed to download attachment {att_id}")
     return None
 
 
@@ -100,37 +92,23 @@ def get_job_documents(jid):
     jd_text = None
     icp_text = None
 
-    print(f"[Zoho] Found {len(attachments)} attachments for job {jid}")
-
     for att in attachments:
         fname = att.get('File_Name', '').lower()
-        att_id = att.get('id')
-
-        print(f"[Zoho] Processing attachment: {fname} (ID: {att_id})")
-
-        content = download_attachment("Job_Openings", jid, att_id)
+        content = download_attachment("Job_Openings", jid, att['id'])
 
         if not content:
-            print(f"[Zoho] Failed to download: {fname}")
             continue
 
         text = extract_text(content, att['File_Name'])
-
         if not text:
-            print(f"[Zoho] Failed to parse: {fname}")
             continue
 
-        print(f"[Zoho] Parsed {fname}: {len(text)} chars")
-
-        if 'jd' in fname or 'job' in fname or 'description' in fname:
+        if 'jd' in fname or 'job' in fname:
             jd_text = text
-        elif 'icp' in fname or 'ideal' in fname or 'profile' in fname:
+        elif 'icp' in fname or 'ideal' in fname:
             icp_text = text
-        else:
-            if jd_text is None:
-                jd_text = text
-            elif icp_text is None:
-                icp_text = text
+        elif not jd_text:
+            jd_text = text
 
     return jd_text, icp_text
 
@@ -142,64 +120,84 @@ def update_candidate_fields(cid, data):
         headers={**_h(), 'Content-Type': 'application/json'},
         json={'data': [data]}
     )
-
-    print(f"[Zoho] Update fields status: {r.status_code}")
-    print(f"[Zoho] Update fields response: {r.text}")
+    print(f"[Zoho] Update fields: {r.status_code}")
     return r
 
 
 def update_candidate_status(cid, jid, status_value):
     """
-    Zoho Recruit-ში Candidate_Status-ის შეცვლა.
-    ⚠️ სავალდებულოა jobids პარამეტრი!
+    ✅ Candidate_Status-ის შეცვლა jobids-ით
     
     Args:
         cid: Candidate ID
-        jid: Job Opening ID (associated job)
-        status_value: ახალი სტატუსი
+        jid: Job Opening ID (can be None for non-Associated candidates)
+        status_value: New status
     """
-
-    url = f"{config.ZOHO_RECRUIT_BASE}/Candidates/status"
-    payload = {
-        'data': [{
-            'ids': [str(cid)],
-            'jobids': [str(jid)],          # <-- ეს იყო missing piece!
-            'Candidate_Status': status_value
-        }]
-    }
-
-    print(f"[Zoho] Change Status: {url}")
-    print(f"[Zoho] Payload: {payload}")
-
-    r = requests.put(
-        url,
-        headers={**_h(), 'Content-Type': 'application/json'},
-        json=payload
-    )
-
-    print(f"[Zoho] Status API response: {r.status_code} - {r.text}")
-
-    if r.status_code == 200:
-        result = r.json().get('data', [{}])[0]
-        if result.get('code') == 'SUCCESS':
-            print(f"[Zoho] ✅ Status changed to: {status_value}")
-            return True
-
-    print(f"[Zoho] ❌ Status change failed!")
-    return False
+    if not jid:
+        # ვეძებთ associated job-ს
+        print("[Zoho] No job_opening_id provided, trying to find it...")
+        jid = get_associated_job(cid)
+    
+    if jid:
+        # ✅ Associated candidate - use jobids
+        payload = {
+            'data': [{
+                'ids': [str(cid)],
+                'jobids': [str(jid)],
+                'Candidate_Status': status_value
+            }]
+        }
+        
+        r = requests.put(
+            f"{config.ZOHO_RECRUIT_BASE}/Candidates/status",
+            headers={**_h(), 'Content-Type': 'application/json'},
+            json=payload,
+            timeout=30
+        )
+        
+        print(f"[Zoho] Status update (with jobids): {r.status_code}")
+        
+        if r.status_code == 200:
+            result = r.json().get('data', [{}])[0]
+            if result.get('code') == 'SUCCESS':
+                print(f"[Zoho] ✅ Status → {status_value}")
+                return True
+            else:
+                print(f"[Zoho] ❌ {result.get('message')}")
+        else:
+            print(f"[Zoho] ❌ HTTP {r.status_code}: {r.text}")
+        
+        return False
+    
+    else:
+        # Fallback: direct field update (for non-Associated)
+        print("[Zoho] No job found, trying direct update...")
+        
+        payload = {'Candidate_Status': status_value}
+        
+        r = requests.put(
+            f"{config.ZOHO_RECRUIT_BASE}/Candidates/{cid}",
+            headers={**_h(), 'Content-Type': 'application/json'},
+            json={'data': [payload]},
+            timeout=30
+        )
+        
+        print(f"[Zoho] Direct status update: {r.status_code}")
+        print(f"[Zoho] Response: {r.text}")
+        
+        return r.status_code == 200
 
 
 def apply_screening_result(cid, jid, score, assessment):
     """
-    Score + Assessment შენახვა და სტატუსის ცვლილება.
+    ✅ Score + Assessment შენახვა და სტატუსის ცვლილება
     
     Args:
         cid: Candidate ID
-        jid: Job Opening ID
-        score: AI score (0-100)
+        jid: Job Opening ID (can be None)
+        score: AI score
         assessment: AI assessment text
     """
-
     # ყოველთვის ვინახავთ score + assessment
     update_candidate_fields(cid, {
         'AI_Score': int(score),
@@ -212,42 +210,29 @@ def apply_screening_result(cid, jid, score, assessment):
         update_candidate_status(cid, jid, config.STATUS_REJECTED)
         return config.STATUS_REJECTED
 
-    if config.REJECT_THRESHOLD <= score < config.SAVE_FOR_FUTURE_THRESHOLD:
-        print(f"[Zoho] Score {score} in [{config.REJECT_THRESHOLD}, {config.SAVE_FOR_FUTURE_THRESHOLD}) -> SAVE FOR FUTURE")
+    if score < config.SAVE_FOR_FUTURE_THRESHOLD:
+        print(f"[Zoho] Score {score} < {config.SAVE_FOR_FUTURE_THRESHOLD} -> SAVE FOR FUTURE")
         update_candidate_status(cid, jid, config.STATUS_SAVE_FOR_FUTURE)
         return config.STATUS_SAVE_FOR_FUTURE
 
     # 80+ -> სტატუსი არ იცვლება
-    print(f"[Zoho] Score {score} >= {config.SAVE_FOR_FUTURE_THRESHOLD} -> keeping current status")
+    print(f"[Zoho] Score {score} >= {config.SAVE_FOR_FUTURE_THRESHOLD} -> keeping status")
     return None
 
 
 def auto_reject_candidate(cid, jid, assessment):
     """
-    ქვეყნის მიხედვით ავტო-reject.
+    ✅ ქვეყნის მიხედვით ავტო-reject
     
     Args:
         cid: Candidate ID
-        jid: Job Opening ID (შეიძლება None იყოს)
-        assessment: reject-ის მიზეზი
+        jid: Job Opening ID (can be None)
+        assessment: Rejection reason
     """
-
     update_candidate_fields(cid, {
         'AI_Score': 0,
         'AI_Assessment': assessment
     })
 
-    if jid:
-        update_candidate_status(cid, jid, config.STATUS_REJECTED)
-    else:
-        print(f"[Zoho] ⚠️ No job_opening_id for auto-reject, trying without jobids...")
-        # jobids გარეშე fallback — შეიძლება არ იმუშაოს
-        url = f"{config.ZOHO_RECRUIT_BASE}/Candidates/status"
-        r = requests.put(
-            url,
-            headers={**_h(), 'Content-Type': 'application/json'},
-            json={'data': [{'ids': [str(cid)], 'Candidate_Status': config.STATUS_REJECTED}]}
-        )
-        print(f"[Zoho] Fallback status response: {r.status_code} - {r.text}")
-
+    update_candidate_status(cid, jid, config.STATUS_REJECTED)
     return config.STATUS_REJECTED
