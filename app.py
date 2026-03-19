@@ -79,19 +79,18 @@ def screen():
         job_title = job.get('Posting_Title', 'Unknown')
         print(f"[4] Job: {job_title}")
 
-        # 5. Get CV
-        print("[5] Downloading CV...")
-        cv_text, cv_filenames = zoho_api.get_candidate_cv(cid)
-        
-        # 6. ენის შემოწმება - CV უნდა იყოს მხოლოდ ინგლისურად!
-        if cv_text:
-            print(f"[6] Checking CV language...")
-            is_english, detected_lang = file_parser.is_english_cv(cv_text)
-            
+        # 5. Get all candidate documents
+        print("[5] Downloading candidate documents...")
+        resume_text, all_docs_text, cv_filenames = zoho_api.get_candidate_documents(cid)
+
+        # 6. ენის შემოწმება - მხოლოდ Resume-ზე ვამოწმებთ!
+        if resume_text:
+            print("[6] Checking Resume language...")
+            is_english, detected_lang = file_parser.is_english_cv(resume_text)
+
             if not is_english:
-                print(f"[6] ❌ Auto-reject: CV is in {detected_lang}")
-                
-                assessment = f"Automatically rejected: CV/Resume is written in {detected_lang}. Only English CVs are accepted for evaluation."
+                print(f"[6] ❌ Auto-reject: Resume is in {detected_lang}")
+                assessment = f"Automatically rejected: CV/Resume is written in {detected_lang}. Only English CVs are accepted."
                 final_status = zoho_api.auto_reject_candidate(cid, jid, assessment)
 
                 return jsonify({
@@ -106,20 +105,48 @@ def screen():
                         'detected_language': detected_lang
                     }
                 }), 200
-            
-            print(f"[6] ✅ CV language OK: {detected_lang}")
+
+            print(f"[6] ✅ Resume language OK: {detected_lang}")
+            cv_text = all_docs_text  # ყველა დოკუმენტი AI-სთვის
+
+        elif all_docs_text:
+            # Resume არ არის, მაგრამ სხვა დოკუმენტები არის
+            print("[6] ⚠️ No Resume found, checking other documents...")
+            is_english, detected_lang = file_parser.is_english_cv(all_docs_text)
+
+            if not is_english:
+                print(f"[6] ❌ Auto-reject: Documents in {detected_lang}")
+                assessment = f"Automatically rejected: Documents are written in {detected_lang}. Only English CVs are accepted."
+                final_status = zoho_api.auto_reject_candidate(cid, jid, assessment)
+
+                return jsonify({
+                    'status': 'success',
+                    'data': {
+                        'candidate': name,
+                        'job': job_title,
+                        'score': 0,
+                        'assessment': assessment,
+                        'status': final_status,
+                        'rejection_reason': 'cv_language',
+                        'detected_language': detected_lang
+                    }
+                }), 200
+
+            print(f"[6] ✅ Documents language OK: {detected_lang}")
+            cv_text = all_docs_text
+
         else:
-            # CV არ არის - გავაგრძელოთ ATS data-ით
-            print("[6] ⚠️ No CV found, using ATS data only")
+            # დოკუმენტები საერთოდ არ არის
+            print("[6] ⚠️ No documents found, using ATS data only")
             cv_text = _build_fallback_cv(candidate)
 
         # 7. Get JD/ICP
         print("[7] Downloading JD/ICP...")
         jd_text, icp_text = zoho_api.get_job_documents(jid)
-        
+
         if not jd_text:
             jd_text = job.get('Job_Description', '')
-        
+
         print(f"[7] JD: {len(jd_text) if jd_text else 0} chars | ICP: {len(icp_text) if icp_text else 0} chars")
 
         # 8. AI Scoring
