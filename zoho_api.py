@@ -1,18 +1,10 @@
 import requests
 import config
 from zoho_auth import auth
-import json as json_lib
 
 
 def _h():
     return {'Authorization': f'Zoho-oauthtoken {auth.get_token()}'}
-
-
-def _api_headers():
-    return {
-        'Authorization': f'Zoho-oauthtoken {auth.get_token()}',
-        'Content-Type': 'application/json'
-    }
 
 
 def get_candidate(cid):
@@ -32,9 +24,11 @@ def get_associated_job(cid):
         f"{config.ZOHO_RECRUIT_BASE}/Candidates/{cid}/associate",
         headers=_h()
     )
+
     if r.status_code != 200:
         print(f"[Zoho] No associated job: {r.status_code} - {r.text}")
         return None
+
     data = r.json()
     if 'data' in data and len(data['data']) > 0:
         return data['data'][0]
@@ -46,38 +40,56 @@ def get_attachments(module, record_id):
         f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments",
         headers=_h()
     )
-    if r.status_code in (204, 400):
+
+    if r.status_code == 204 or r.status_code == 400:
         return []
+
     if r.status_code != 200:
         print(f"[Zoho] Get attachments failed: {r.status_code} - {r.text}")
         return []
+
     return r.json().get('data', [])
 
 
 def download_attachment(module, record_id, att_id):
-    urls = [
-        f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}",
-        f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}/$download",
-        f"https://recruit.zoho.com/recruit/v2/files/{att_id}",
-    ]
-    for i, url in enumerate(urls, 1):
-        print(f"[Zoho] Download attempt {i}: {url}")
-        r = requests.get(url, headers=_h())
-        if r.status_code == 200 and len(r.content) > 0:
-            print(f"[Zoho] Download success (method {i}): {len(r.content)} bytes")
-            return r.content
+    url1 = f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}"
+    print(f"[Zoho] Download attempt 1: {url1}")
+    r = requests.get(url1, headers=_h())
+
+    if r.status_code == 200 and len(r.content) > 0:
+        print(f"[Zoho] Download success (method 1): {len(r.content)} bytes")
+        return r.content
+
+    url2 = f"{config.ZOHO_RECRUIT_BASE}/{module}/{record_id}/Attachments/{att_id}/$download"
+    print(f"[Zoho] Download attempt 2: {url2}")
+    r = requests.get(url2, headers=_h())
+
+    if r.status_code == 200 and len(r.content) > 0:
+        print(f"[Zoho] Download success (method 2): {len(r.content)} bytes")
+        return r.content
+
+    url3 = f"https://recruit.zoho.com/recruit/v2/files/{att_id}"
+    print(f"[Zoho] Download attempt 3: {url3}")
+    r = requests.get(url3, headers=_h())
+
+    if r.status_code == 200 and len(r.content) > 0:
+        print(f"[Zoho] Download success (method 3): {len(r.content)} bytes")
+        return r.content
+
     print(f"[Zoho] All download methods failed for attachment {att_id}")
     return None
 
 
 def get_candidate_cv(cid):
     attachments = get_attachments("Candidates", cid)
+
     for att in attachments:
         fname = att.get('File_Name', '').lower()
         if any(ext in fname for ext in ['.pdf', '.docx', '.doc']):
             content = download_attachment("Candidates", cid, att['id'])
             if content:
                 return content, att['File_Name']
+
     return None, None
 
 
@@ -93,14 +105,19 @@ def get_job_documents(jid):
     for att in attachments:
         fname = att.get('File_Name', '').lower()
         att_id = att.get('id')
+
         print(f"[Zoho] Processing attachment: {fname} (ID: {att_id})")
 
         content = download_attachment("Job_Openings", jid, att_id)
+
         if not content:
+            print(f"[Zoho] Failed to download: {fname}")
             continue
 
         text = extract_text(content, att['File_Name'])
+
         if not text:
+            print(f"[Zoho] Failed to parse: {fname}")
             continue
 
         print(f"[Zoho] Parsed {fname}: {len(text)} chars")
@@ -118,239 +135,119 @@ def get_job_documents(jid):
     return jd_text, icp_text
 
 
-# ============================================================
-#  CORE: Update & Status Change Logic
-# ============================================================
-
-def _update_record(cid, fields):
-    """ველების განახლება (არა სტატუსი)"""
-    payload = {'data': [fields]}
-    print(f"[Zoho] Updating candidate {cid}: {fields}")
-
+def update_candidate_fields(cid, data):
+    """AI_Score და AI_Assessment ველების განახლება"""
     r = requests.put(
         f"{config.ZOHO_RECRUIT_BASE}/Candidates/{cid}",
-        headers=_api_headers(),
+        headers={**_h(), 'Content-Type': 'application/json'},
+        json={'data': [data]}
+    )
+
+    print(f"[Zoho] Update fields status: {r.status_code}")
+    print(f"[Zoho] Update fields response: {r.text}")
+    return r
+
+
+def update_candidate_status(cid, jid, status_value):
+    """
+    Zoho Recruit-ში Candidate_Status-ის შეცვლა.
+    ⚠️ სავალდებულოა jobids პარამეტრი!
+    
+    Args:
+        cid: Candidate ID
+        jid: Job Opening ID (associated job)
+        status_value: ახალი სტატუსი
+    """
+
+    url = f"{config.ZOHO_RECRUIT_BASE}/Candidates/status"
+    payload = {
+        'data': [{
+            'ids': [str(cid)],
+            'jobids': [str(jid)],          # <-- ეს იყო missing piece!
+            'Candidate_Status': status_value
+        }]
+    }
+
+    print(f"[Zoho] Change Status: {url}")
+    print(f"[Zoho] Payload: {payload}")
+
+    r = requests.put(
+        url,
+        headers={**_h(), 'Content-Type': 'application/json'},
         json=payload
     )
-    print(f"[Zoho] Response: {r.status_code} - {r.text}")
 
-    if r.status_code != 200:
-        return False, f"HTTP {r.status_code}"
+    print(f"[Zoho] Status API response: {r.status_code} - {r.text}")
 
-    try:
-        resp = r.json()
-        code = resp.get('data', [{}])[0].get('code', '')
-        return code == 'SUCCESS', code
-    except Exception:
-        return False, "Parse error"
+    if r.status_code == 200:
+        result = r.json().get('data', [{}])[0]
+        if result.get('code') == 'SUCCESS':
+            print(f"[Zoho] ✅ Status changed to: {status_value}")
+            return True
+
+    print(f"[Zoho] ❌ Status change failed!")
+    return False
 
 
-def _get_blueprint_transitions(cid):
+def apply_screening_result(cid, jid, score, assessment):
     """
-    Blueprint-ის ხელმისაწვდომი transition-ების წამოღება
+    Score + Assessment შენახვა და სტატუსის ცვლილება.
+    
+    Args:
+        cid: Candidate ID
+        jid: Job Opening ID
+        score: AI score (0-100)
+        assessment: AI assessment text
     """
-    url = f"{config.ZOHO_RECRUIT_BASE}/Candidates/{cid}/actions/blueprint"
-    print(f"[Blueprint] Getting transitions: {url}")
 
-    r = requests.get(url, headers=_h())
-    print(f"[Blueprint] Response: {r.status_code}")
+    # ყოველთვის ვინახავთ score + assessment
+    update_candidate_fields(cid, {
+        'AI_Score': int(score),
+        'AI_Assessment': assessment
+    })
 
-    if r.status_code != 200:
-        print(f"[Blueprint] No blueprint or error: {r.text}")
-        return None, []
+    # სტატუსის ლოგიკა
+    if score < config.REJECT_THRESHOLD:
+        print(f"[Zoho] Score {score} < {config.REJECT_THRESHOLD} -> REJECTING")
+        update_candidate_status(cid, jid, config.STATUS_REJECTED)
+        return config.STATUS_REJECTED
 
-    data = r.json()
-    print(f"[Blueprint] Full response: {json_lib.dumps(data, indent=2)}")
+    if config.REJECT_THRESHOLD <= score < config.SAVE_FOR_FUTURE_THRESHOLD:
+        print(f"[Zoho] Score {score} in [{config.REJECT_THRESHOLD}, {config.SAVE_FOR_FUTURE_THRESHOLD}) -> SAVE FOR FUTURE")
+        update_candidate_status(cid, jid, config.STATUS_SAVE_FOR_FUTURE)
+        return config.STATUS_SAVE_FOR_FUTURE
 
-    blueprint = data.get('blueprint', {})
-    transitions = blueprint.get('transitions', [])
-
-    print(f"[Blueprint] Found {len(transitions)} transitions:")
-    for t in transitions:
-        print(f"  - ID: {t.get('id')} | Name: '{t.get('name')}' "
-              f"| Next: '{t.get('next_field_value', 'N/A')}'")
-
-    return blueprint, transitions
-
-
-def _find_transition_to_status(transitions, target_status):
-    """
-    target_status-ზე გადასვლის transition-ის პოვნა
-    """
-    target_lower = target_status.lower().strip()
-
-    for t in transitions:
-        # მეთოდი 1: next_field_value-ით
-        next_val = str(t.get('next_field_value', '')).lower().strip()
-        if next_val == target_lower:
-            print(f"[Blueprint] ✅ Found transition by next_field_value: {t.get('name')} (ID: {t.get('id')})")
-            return t
-
-        # მეთოდი 2: name-ით
-        name = str(t.get('name', '')).lower().strip()
-        if target_lower in name or name in target_lower:
-            print(f"[Blueprint] ✅ Found transition by name: {t.get('name')} (ID: {t.get('id')})")
-            return t
-
-    print(f"[Blueprint] ❌ No transition found for '{target_status}'")
+    # 80+ -> სტატუსი არ იცვლება
+    print(f"[Zoho] Score {score} >= {config.SAVE_FOR_FUTURE_THRESHOLD} -> keeping current status")
     return None
 
 
-def _execute_blueprint_transition(cid, transition):
+def auto_reject_candidate(cid, jid, assessment):
     """
-    Blueprint transition-ის შესრულება
-    """
-    transition_id = transition.get('id')
-    url = f"{config.ZOHO_RECRUIT_BASE}/Candidates/{cid}/actions/blueprint"
-
-    payload = {
-        "blueprint": [
-            {
-                "transition_id": str(transition_id),
-                "data": {}
-            }
-        ]
-    }
-
-    print(f"[Blueprint] Executing transition ID: {transition_id}")
-    print(f"[Blueprint] URL: {url}")
-    print(f"[Blueprint] Payload: {json_lib.dumps(payload)}")
-
-    r = requests.put(url, headers=_api_headers(), json=payload)
-
-    print(f"[Blueprint] Execute response: {r.status_code}")
-    print(f"[Blueprint] Execute body: {r.text}")
-
-    if r.status_code == 200:
-        resp = r.json()
-        code = resp.get('data', [{}])[0].get('code', '') if 'data' in resp else ''
-        if code == 'SUCCESS' or r.status_code == 200:
-            print(f"[Blueprint] ✅ Transition executed successfully")
-            return True
-
-    print(f"[Blueprint] ❌ Transition failed")
-    return False
-
-
-def _change_status_via_blueprint(cid, target_status):
-    """
-    Blueprint-ის მეშვეობით სტატუსის შეცვლა
-    შეიძლება რამდენიმე ნაბიჯი იყოს საჭირო (multi-step)
-    """
-    max_steps = 5  # უსაფრთხოების ლიმიტი
+    ქვეყნის მიხედვით ავტო-reject.
     
-    for step in range(max_steps):
-        print(f"\n[Blueprint] === Step {step + 1} ===")
-        
-        # მიმდინარე სტატუსის შემოწმება
-        candidate = get_candidate(cid)
-        current = candidate.get('Candidate_Status', '')
-        print(f"[Blueprint] Current status: '{current}'")
-        
-        if current.lower().strip() == target_status.lower().strip():
-            print(f"[Blueprint] ✅ Already at target status!")
-            return True
-        
-        # ხელმისაწვდომი transition-ები
-        blueprint, transitions = _get_blueprint_transitions(cid)
-        
-        if not transitions:
-            print(f"[Blueprint] No transitions available from '{current}'")
-            return False
-        
-        # target-ისკენ transition
-        transition = _find_transition_to_status(transitions, target_status)
-        
-        if not transition:
-            # შეიძლება შუალედური ნაბიჯი გჭირდეს
-            print(f"[Blueprint] No direct transition to '{target_status}'")
-            print(f"[Blueprint] Available transitions:")
-            for t in transitions:
-                print(f"  → {t.get('name')} (next: {t.get('next_field_value', '?')})")
-            return False
-        
-        # transition-ის შესრულება
-        success = _execute_blueprint_transition(cid, transition)
-        if not success:
-            return False
-    
-    return False
-
-
-def _verify_candidate_status(cid, expected_status):
-    """განახლების ვერიფიკაცია"""
-    try:
-        candidate = get_candidate(cid)
-        actual = candidate.get('Candidate_Status', 'Unknown')
-        ai_score = candidate.get('AI_Score', 'N/A')
-
-        if actual == expected_status:
-            print(f"[Zoho] ✅ VERIFIED: Status='{actual}', AI_Score={ai_score}")
-            return True
-        else:
-            print(f"[Zoho] ❌ MISMATCH: Expected='{expected_status}', Got='{actual}'")
-            return False
-    except Exception as e:
-        print(f"[Zoho] Verification error: {e}")
-        return False
-
-
-def apply_screening_result(cid, score, assessment):
+    Args:
+        cid: Candidate ID
+        jid: Job Opening ID (შეიძლება None იყოს)
+        assessment: reject-ის მიზეზი
     """
-    მთავარი ფუნქცია: AI Score + Assessment + Status
-    """
-    score = int(score)
 
-    if score < config.REJECT_THRESHOLD:
-        target_status = config.STATUS_REJECTED
-    elif score < config.SAVE_FOR_FUTURE_THRESHOLD:
-        target_status = config.STATUS_SAVE_FOR_FUTURE
-    else:
-        target_status = None
-
-    print(f"\n[Zoho] === APPLYING SCREENING RESULT ===")
-    print(f"[Zoho] Score: {score}")
-    print(f"[Zoho] Target status: {target_status or 'NO CHANGE (80+)'}")
-
-    # 1. AI_Score + AI_Assessment ჩაწერა (ეს მუშაობს)
-    fields_success, _ = _update_record(cid, {
-        'AI_Score': score,
-        'AI_Assessment': str(assessment)[:2000]
-    })
-    print(f"[Zoho] Fields (score+assessment): {'✅' if fields_success else '❌'}")
-
-    # 2. სტატუსის ცვლილება Blueprint-ით
-    if target_status:
-        print(f"\n[Zoho] Changing status via Blueprint...")
-        bp_success = _change_status_via_blueprint(cid, target_status)
-
-        if bp_success:
-            print(f"[Zoho] ✅ Blueprint status change succeeded")
-        else:
-            print(f"[Zoho] ❌ Blueprint failed, trying direct update...")
-            _update_record(cid, {'Candidate_Status': target_status})
-
-        # ვერიფიკაცია
-        _verify_candidate_status(cid, target_status)
-
-    print(f"[Zoho] === SCREENING RESULT APPLIED ===\n")
-    return target_status
-
-
-def auto_reject_candidate(cid, assessment):
-    """ქვეყნით auto-reject"""
-    print(f"\n[Zoho] === AUTO REJECT BY COUNTRY ===")
-
-    _update_record(cid, {
+    update_candidate_fields(cid, {
         'AI_Score': 0,
-        'AI_Assessment': str(assessment)
+        'AI_Assessment': assessment
     })
 
-    bp_success = _change_status_via_blueprint(cid, config.STATUS_REJECTED)
+    if jid:
+        update_candidate_status(cid, jid, config.STATUS_REJECTED)
+    else:
+        print(f"[Zoho] ⚠️ No job_opening_id for auto-reject, trying without jobids...")
+        # jobids გარეშე fallback — შეიძლება არ იმუშაოს
+        url = f"{config.ZOHO_RECRUIT_BASE}/Candidates/status"
+        r = requests.put(
+            url,
+            headers={**_h(), 'Content-Type': 'application/json'},
+            json={'data': [{'ids': [str(cid)], 'Candidate_Status': config.STATUS_REJECTED}]}
+        )
+        print(f"[Zoho] Fallback status response: {r.status_code} - {r.text}")
 
-    if not bp_success:
-        _update_record(cid, {'Candidate_Status': config.STATUS_REJECTED})
-
-    _verify_candidate_status(cid, config.STATUS_REJECTED)
-    print(f"[Zoho] === AUTO REJECT DONE ===\n")
     return config.STATUS_REJECTED
