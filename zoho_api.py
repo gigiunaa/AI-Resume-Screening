@@ -7,6 +7,16 @@ def _h():
     return {'Authorization': f'Zoho-oauthtoken {auth.get_token()}'}
 
 
+def _safe_lower(value):
+    """უსაფრთხოდ გარდაქმნის მნიშვნელობას lowercase string-ად"""
+    if value is None:
+        return ''
+    if isinstance(value, dict):
+        # თუ dict არის, ვეძებთ 'name' ველს
+        return str(value.get('name', '')).lower().strip()
+    return str(value).lower().strip()
+
+
 def get_candidate(cid):
     r = requests.get(f"{config.ZOHO_RECRUIT_BASE}/Candidates/{cid}", headers=_h())
     r.raise_for_status()
@@ -20,9 +30,7 @@ def get_job_opening(jid):
 
 
 def get_associated_job(cid):
-    """
-    იპოვის Job Opening ID-ს რომელზეც Associated არის კანდიდატი
-    """
+    """იპოვის Job Opening ID-ს რომელზეც Associated არის კანდიდატი"""
     candidate = get_candidate(cid)
     
     job_name = candidate.get('Latest_Job_Opening')
@@ -74,11 +82,6 @@ def download_attachment(module, record_id, att_id):
 def get_candidate_documents(cid):
     """
     კანდიდატის ყველა დოკუმენტის ჩამოტვირთვა და გაერთიანება.
-    
-    აბრუნებს:
-        - resume_text: მთავარი CV/Resume ტექსტი
-        - all_documents_text: ყველა დოკუმენტის გაერთიანებული ტექსტი
-        - filenames: ფაილების სახელები
     """
     from file_parser import extract_text
     
@@ -100,10 +103,11 @@ def get_candidate_documents(cid):
     }
     
     for att in attachments:
-        fname = att.get('File_Name', '').lower()
-        category = (att.get('Category') or '').lower().strip()
+        fname = _safe_lower(att.get('File_Name', ''))
+        category = _safe_lower(att.get('Category'))
         
-        print(f"[Zoho]   📎 {att['File_Name']} (Category: {category or 'N/A'})")
+        original_fname = att.get('File_Name', 'Unknown')
+        print(f"[Zoho]   📎 {original_fname} (Category: {category or 'N/A'})")
         
         # მხოლოდ ტექსტური ფაილები
         if not any(ext in fname for ext in ['.pdf', '.docx', '.doc', '.txt', '.rtf']):
@@ -122,85 +126,84 @@ def get_candidate_documents(cid):
         else:
             documents['other'].append(att)
     
-    # ტექსტების შეგროვება სტრუქტურირებულად
+    # ტექსტების შეგროვება
     all_texts = []
     resume_text = None
     all_filenames = []
     
-    # 1. RESUME (მთავარი დოკუმენტი)
+    # 1. RESUME
     if documents['resume']:
         print(f"\n[Zoho] 📄 Processing RESUME files...")
-        for att in documents['resume'][:2]:  # მაქს 2 resume
+        for att in documents['resume'][:2]:
             content = download_attachment("Candidates", cid, att['id'])
             if content:
-                text = extract_text(content, att['File_Name'])
+                text = extract_text(content, att.get('File_Name', 'document.pdf'))
                 if text and len(text) > 100:
                     section = f"""
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  📄 RESUME: {att['File_Name'][:60]}
+║  📄 RESUME: {att.get('File_Name', 'Unknown')[:60]}
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 {text}
 """
                     all_texts.append(section)
-                    all_filenames.append(att['File_Name'])
+                    all_filenames.append(att.get('File_Name', 'Unknown'))
                     
-                    # პირველი resume მთავარია
                     if resume_text is None:
                         resume_text = text
                     
-                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+                    print(f"[Zoho]     ✅ Added: {att.get('File_Name')} ({len(text)} chars)")
     
     # 2. COVER LETTER
     if documents['cover_letter']:
         print(f"\n[Zoho] 💌 Processing COVER LETTER files...")
-        for att in documents['cover_letter'][:1]:  # მაქს 1
+        for att in documents['cover_letter'][:1]:
             content = download_attachment("Candidates", cid, att['id'])
             if content:
-                text = extract_text(content, att['File_Name'])
+                text = extract_text(content, att.get('File_Name', 'document.pdf'))
                 if text and len(text) > 100:
                     section = f"""
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  💌 COVER LETTER: {att['File_Name'][:55]}
+║  💌 COVER LETTER: {att.get('File_Name', 'Unknown')[:55]}
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 {text}
 """
                     all_texts.append(section)
-                    all_filenames.append(att['File_Name'])
-                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+                    all_filenames.append(att.get('File_Name', 'Unknown'))
+                    print(f"[Zoho]     ✅ Added: {att.get('File_Name')} ({len(text)} chars)")
     
     # 3. PORTFOLIO
     if documents['portfolio']:
         print(f"\n[Zoho] 🎨 Processing PORTFOLIO files...")
-        for att in documents['portfolio'][:1]:  # მაქს 1
+        for att in documents['portfolio'][:1]:
             content = download_attachment("Candidates", cid, att['id'])
             if content:
-                text = extract_text(content, att['File_Name'])
+                text = extract_text(content, att.get('File_Name', 'document.pdf'))
                 if text and len(text) > 100:
                     section = f"""
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  🎨 PORTFOLIO: {att['File_Name'][:57]}
+║  🎨 PORTFOLIO: {att.get('File_Name', 'Unknown')[:57]}
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 {text}
 """
                     all_texts.append(section)
-                    all_filenames.append(att['File_Name'])
-                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+                    all_filenames.append(att.get('File_Name', 'Unknown'))
+                    print(f"[Zoho]     ✅ Added: {att.get('File_Name')} ({len(text)} chars)")
     
-    # 4. CERTIFICATES (მნიშვნელოვანია შეფასებისთვის!)
+    # 4. CERTIFICATES
     if documents['certificate']:
         print(f"\n[Zoho] 🏆 Processing CERTIFICATE files...")
         cert_texts = []
-        for att in documents['certificate'][:3]:  # მაქს 3 სერტიფიკატი
+        for att in documents['certificate'][:3]:
             content = download_attachment("Candidates", cid, att['id'])
             if content:
-                text = extract_text(content, att['File_Name'])
-                if text and len(text) > 20:  # სერტიფიკატები შეიძლება მოკლე იყოს
-                    cert_texts.append(f"• {att['File_Name']}:\n{text[:500]}")  # მაქს 500 სიმბოლო თითოზე
-                    all_filenames.append(att['File_Name'])
-                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+                text = extract_text(content, att.get('File_Name', 'document.pdf'))
+                if text and len(text) > 20:
+                    cert_texts.append(f"• {att.get('File_Name', 'Certificate')}:\n{text[:500]}")
+                    all_filenames.append(att.get('File_Name', 'Unknown'))
+                    print(f"[Zoho]     ✅ Added: {att.get('File_Name')} ({len(text)} chars)")
         
         if cert_texts:
             section = f"""
@@ -212,26 +215,26 @@ def get_candidate_documents(cid):
 """
             all_texts.append(section)
     
-    # 5. OTHER DOCUMENTS (თუ resume არ არის, შეიძლება სხვა ფაილში იყოს ინფო)
+    # 5. OTHER
     if documents['other']:
         print(f"\n[Zoho] 📁 Processing OTHER files...")
-        for att in documents['other'][:2]:  # მაქს 2
+        for att in documents['other'][:2]:
             content = download_attachment("Candidates", cid, att['id'])
             if content:
-                text = extract_text(content, att['File_Name'])
-                if text and len(text) > 200:  # მხოლოდ შინაარსიანი ფაილები
+                text = extract_text(content, att.get('File_Name', 'document.pdf'))
+                if text and len(text) > 200:
                     section = f"""
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  📁 ADDITIONAL DOCUMENT: {att['File_Name'][:48]}
+║  📁 ADDITIONAL DOCUMENT: {att.get('File_Name', 'Unknown')[:48]}
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 {text}
 """
                     all_texts.append(section)
-                    all_filenames.append(att['File_Name'])
-                    print(f"[Zoho]     ✅ Added: {att['File_Name']} ({len(text)} chars)")
+                    all_filenames.append(att.get('File_Name', 'Unknown'))
+                    print(f"[Zoho]     ✅ Added: {att.get('File_Name')} ({len(text)} chars)")
     
-    # შედეგების დაბრუნება
+    # შედეგები
     if all_texts:
         combined_text = "\n".join(all_texts)
         combined_filenames = " | ".join(all_filenames)
@@ -249,13 +252,9 @@ def get_candidate_documents(cid):
 
 
 def get_candidate_cv(cid):
-    """
-    კანდიდატის CV ტექსტის მიღება (compatibility wrapper)
-    აბრუნებს: (combined_text, filenames)
-    """
+    """კანდიდატის CV ტექსტის მიღება"""
     resume_text, all_docs_text, filenames = get_candidate_documents(cid)
     
-    # ვაბრუნებთ გაერთიანებულ ტექსტს რათა AI-მ ყველაფერი დაინახოს
     if all_docs_text:
         return all_docs_text, filenames
     
@@ -270,13 +269,13 @@ def get_job_documents(jid):
     icp_text = None
 
     for att in attachments:
-        fname = att.get('File_Name', '').lower()
+        fname = _safe_lower(att.get('File_Name', ''))
         content = download_attachment("Job_Openings", jid, att['id'])
 
         if not content:
             continue
 
-        text = extract_text(content, att['File_Name'])
+        text = extract_text(content, att.get('File_Name', 'document.pdf'))
         if not text:
             continue
 
@@ -302,9 +301,7 @@ def update_candidate_fields(cid, data):
 
 
 def update_candidate_status(cid, jid, status_value):
-    """
-    Candidate_Status-ის შეცვლა jobids-ით
-    """
+    """Candidate_Status-ის შეცვლა jobids-ით"""
     if not jid:
         print("[Zoho] No job_opening_id provided, trying to find it...")
         jid = get_associated_job(cid)
@@ -339,25 +336,21 @@ def update_candidate_status(cid, jid, status_value):
     
     else:
         print("[Zoho] No job found, trying direct update...")
-        
         r = requests.put(
             f"{config.ZOHO_RECRUIT_BASE}/Candidates/{cid}",
             headers={**_h(), 'Content-Type': 'application/json'},
             json={'data': [{'Candidate_Status': status_value}]},
             timeout=30
         )
-        
         print(f"[Zoho] Direct update: {r.status_code}")
         return r.status_code == 200
 
 
 def apply_screening_result(cid, jid, score, assessment):
-    """
-    Score + Assessment შენახვა და სტატუსის ცვლილება
-    """
+    """Score + Assessment შენახვა და სტატუსის ცვლილება"""
     update_candidate_fields(cid, {
         'AI_Score': int(score),
-        'AI_Assessment': assessment[:5000]  # Zoho field limit
+        'AI_Assessment': assessment[:5000]
     })
 
     if score < config.REJECT_THRESHOLD:
