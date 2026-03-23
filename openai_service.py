@@ -4,9 +4,11 @@ import config
 
 client = OpenAI(api_key=config.OPENAI_API_KEY)
 
+# Cache: {job_id: rubric_dict} — ერთი job-ისთვის ერთხელ გენერირდება
+_rubric_cache = {}
+
 
 def _normalize(value):
-    """ველის მნიშვნელობის ნორმალიზება"""
     if value is None:
         return "N/A"
     if isinstance(value, list):
@@ -18,127 +20,72 @@ def _normalize(value):
     return str(value)
 
 
-def score(cv_text, jd_text, icp_text, job_info, candidate_info):
+# ─────────────────────────────────────────────
+# CALL 1 — Rubric generation (cached per job)
+# ─────────────────────────────────────────────
+
+def generate_rubric(jd_text, icp_text, job_info, job_id=None):
     """
-    კანდიდატის შეფასება AI-ით
+    JD + ICP-დან ამოიკითხავს:
+    - job_type (tech / non-tech / finance / operations)
+    - seniority (intern / junior / mid / senior / lead)
+    - must_have_skills (სია — მხოლოდ ეს ითვლება score-ში)
+    - nice_to_have_skills (სია — score-ში არ ითვლება, assessment-ში ჩაიწერება)
+    - key_weights (technical / experience / edu_lang — სულ 100)
+
+    Cache: თუ job_id მოწოდებულია და უკვე გამოთვლილია — cached ვერსია ბრუნდება.
     """
-    
-    system = """You are an expert technical recruiter with 15+ years of experience.
+    if job_id and job_id in _rubric_cache:
+        print(f"[Rubric] Cache hit for job {job_id}")
+        return _rubric_cache[job_id]
 
-Evaluate the candidate against the job requirements using this scoring system:
+    print(f"[Rubric] Generating rubric for job {job_id or 'unknown'}...")
 
-═══════════════════════════════════════════════════════════════════════════════
-SCORING (100 points total)
-═══════════════════════════════════════════════════════════════════════════════
+    system = """You are a senior technical recruiter. Analyze the job description and ideal candidate profile, then output a structured scoring rubric in JSON.
 
-## 1. TECHNICAL SKILLS (40 points)
-- Must-have skills present: 0-25 pts
-- Nice-to-have skills: 0-10 pts  
-- Technology stack match: 0-5 pts
-
-## 2. EXPERIENCE (30 points)
-- Years of experience match: 0-10 pts
-- Industry experience: 0-10 pts
-- Role/seniority alignment: 0-10 pts
-
-## 3. EDUCATION & LANGUAGE (15 points)
-- Education level: 0-8 pts
-- English proficiency vs requirement: 0-7 pts
-
-## 4. CULTURE FIT (15 points)
-- Career trajectory: 0-5 pts
-- Job stability: 0-5 pts
-- Motivation signals: 0-5 pts
-
-═══════════════════════════════════════════════════════════════════════════════
-CRITICAL RULES
-═══════════════════════════════════════════════════════════════════════════════
-
-1. If >50% must-have skills missing → technical_skills MAX 15
-2. If English 2+ levels below requirement → education_language MAX 5
-3. If experience 3+ years below requirement → experience MAX 10
-4. If CV is for wrong field entirely → all categories MAX 5 each
-5. If no CV/data available → score based ONLY on available ATS data
-
-IMPORTANT: The "score" field MUST equal the sum of all breakdown values!
-
-═══════════════════════════════════════════════════════════════════════════════
-OUTPUT FORMAT (JSON)
-═══════════════════════════════════════════════════════════════════════════════
-
+OUTPUT FORMAT (JSON only, no extra text):
 {
-    "breakdown": {
-        "technical_skills": <0-40>,
-        "experience": <0-30>,
-        "education_language": <0-15>,
-        "culture_fit": <0-15>
+    "job_type": "<tech | non-tech | finance | operations>",
+    "seniority": "<intern | junior | mid | senior | lead>",
+    "must_have_skills": ["skill1", "skill2", ...],
+    "nice_to_have_skills": ["skill1", "skill2", ...],
+    "weights": {
+        "technical": <integer, 0-100>,
+        "experience": <integer, 0-100>,
+        "edu_lang": <integer, 0-100>
     },
-    "assessment": "<3-5 sentences with specific evidence>",
-    "strengths": ["strength 1", "strength 2"],
-    "concerns": ["concern 1", "concern 2"],
-    "missing_must_haves": ["missing 1", "missing 2"],
-    "recommendation": "<STRONG_YES | YES | MAYBE | NO | STRONG_NO>"
+    "min_years_experience": <integer>,
+    "english_required": "<A1|A2|B1|B2|C1|C2>",
+    "notes": "<1 sentence about key focus of this role>"
 }
 
-DO NOT include a separate "score" field - it will be calculated from breakdown."""
+RULES:
+- weights must sum to exactly 100
+- must_have_skills = only mandatory requirements from JD (no nice-to-haves)
+- nice_to_have_skills = bonus skills that improve candidacy but are not required
+- Adjust weights by job type:
+  * tech/senior: technical 45-55, experience 30-40, edu_lang 10-20
+  * tech/junior: technical 35-40, experience 15-20, edu_lang 30-40
+  * non-tech/senior: technical 10-20, experience 40-50, edu_lang 25-35
+  * finance/legal: technical 20-30, experience 35-45, edu_lang 25-35
+  * operations: technical 15-25, experience 35-45, edu_lang 25-35
+- english_required: use B2 as default if not specified"""
 
-    # Candidate profile
-    candidate_profile = f"""
-═══ CANDIDATE DATA (ATS) ═══
-
-Name: {_normalize(candidate_info.get('Full_Name'))}
-Location: {_normalize(candidate_info.get('Country'))}, {_normalize(candidate_info.get('City'))}
-
-Experience:
-- Years: {_normalize(candidate_info.get('Experience_in_Years'))}
-- Current Title: {_normalize(candidate_info.get('Current_Job_Title'))}
-- Employer: {_normalize(candidate_info.get('Current_Employer'))}
-- Seniority: {_normalize(candidate_info.get('Current_Seniority'))}
-
-Skills: {_normalize(candidate_info.get('Skill_Set'))}
-Additional Skills: {_normalize(candidate_info.get('Skills'))}
-
-Education: {_normalize(candidate_info.get('Highest_Qualification_Held'))}
-
-Languages:
-- English: {_normalize(candidate_info.get('English_Level'))}
-- Other: {_normalize(candidate_info.get('Other_Language'))}
-
-Expected Salary: {_normalize(candidate_info.get('Expected_Salary'))} {_normalize(candidate_info.get('Currency'))}
-
-Summary: {_normalize(candidate_info.get('Professional_Sumarry'))}
-"""
-
-    # Job requirements
-    job_requirements = f"""
-═══ JOB REQUIREMENTS ═══
-
+    user_message = f"""JOB OPENING INFO:
 Position: {_normalize(job_info.get('Posting_Title'))}
 Seniority: {_normalize(job_info.get('Seniority'))}
 Industry: {_normalize(job_info.get('Industry'))}
-
 Required Skills: {_normalize(job_info.get('Required_Skills'))}
-
-Required English: {_normalize(job_info.get('English_Level'))}
 Required Experience: {_normalize(job_info.get('Work_Experience'))}
-"""
+Required English: {_normalize(job_info.get('English_Level'))}
 
-    user_message = f"""{job_requirements}
+JOB DESCRIPTION:
+{jd_text or 'Not provided'}
 
-═══ JOB DESCRIPTION ═══
-{jd_text if jd_text else 'Not provided'}
+IDEAL CANDIDATE PROFILE:
+{icp_text or 'Not provided'}
 
-═══ IDEAL CANDIDATE PROFILE ═══
-{icp_text if icp_text else 'Not provided'}
-
-{candidate_profile}
-
-═══ CANDIDATE CV/RESUME ═══
-{cv_text if cv_text else 'No CV provided - evaluate based on ATS data only'}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TASK: Evaluate and provide breakdown scores. Be specific and cite evidence.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+Generate the scoring rubric for this specific role."""
 
     try:
         resp = client.chat.completions.create(
@@ -148,90 +95,179 @@ TASK: Evaluate and provide breakdown scores. Be specific and cite evidence.
                 {"role": "user", "content": user_message}
             ],
             temperature=0.1,
+            max_tokens=800,
+            response_format={"type": "json_object"}
+        )
+
+        rubric = json.loads(resp.choices[0].message.content)
+        print(f"[Rubric] Generated: {rubric.get('job_type')} / {rubric.get('seniority')}")
+        print(f"[Rubric] Must-haves: {rubric.get('must_have_skills', [])}")
+        print(f"[Rubric] Weights: {rubric.get('weights', {})}")
+
+        if job_id:
+            _rubric_cache[job_id] = rubric
+
+        return rubric
+
+    except Exception as e:
+        print(f"[Rubric] Error: {e}")
+        # Fallback rubric
+        return {
+            "job_type": "tech",
+            "seniority": "mid",
+            "must_have_skills": _normalize(job_info.get('Required_Skills')).split(", "),
+            "nice_to_have_skills": [],
+            "weights": {"technical": 40, "experience": 30, "edu_lang": 30},
+            "min_years_experience": 3,
+            "english_required": "B2",
+            "notes": "Fallback rubric due to generation error"
+        }
+
+
+# ─────────────────────────────────────────────
+# CALL 2 — Candidate scoring against rubric
+# ─────────────────────────────────────────────
+
+def score_candidate(cv_text, rubric, candidate_info):
+    """
+    კანდიდატს აფასებს rubric-ის მიხედვით.
+    Score = 0–100 (match %).
+    Nice-to-have skills score-ში არ ითვლება — მხოლოდ assessment-ში ჩაიწერება.
+    """
+
+    weights = rubric.get("weights", {"technical": 40, "experience": 30, "edu_lang": 30})
+    must_haves = rubric.get("must_have_skills", [])
+    nice_to_haves = rubric.get("nice_to_have_skills", [])
+
+    system = f"""You are a senior technical recruiter evaluating a candidate against a specific job rubric.
+
+SCORING RUBRIC:
+- Job type: {rubric.get('job_type')}
+- Seniority level: {rubric.get('seniority')}
+- Minimum experience: {rubric.get('min_years_experience')} years
+- Required English: {rubric.get('english_required')}
+- Role focus: {rubric.get('notes')}
+
+MANDATORY REQUIREMENTS (score is based ONLY on these):
+{json.dumps(must_haves, ensure_ascii=False)}
+
+NICE-TO-HAVE (do NOT include in score — mention in assessment only):
+{json.dumps(nice_to_haves, ensure_ascii=False)}
+
+WEIGHT DISTRIBUTION (sums to 100):
+- Technical skills match: {weights.get('technical')} points
+- Experience match: {weights.get('experience')} points  
+- Education & Language: {weights.get('edu_lang')} points
+
+SCORING RULES:
+1. Score ONLY against mandatory requirements — nice-to-haves must NOT affect the score
+2. If >50% of must-have skills are missing → technical score MAX 40% of technical weight
+3. If experience is 3+ years below requirement → experience score MAX 30% of experience weight
+4. If English is below {rubric.get('english_required')} → edu_lang score MAX 20% of edu_lang weight
+5. Wrong field entirely → all categories MAX 10%
+
+OUTPUT FORMAT (JSON only):
+{{
+    "breakdown": {{
+        "technical": <0 to {weights.get('technical')}>,
+        "experience": <0 to {weights.get('experience')}>,
+        "edu_lang": <0 to {weights.get('edu_lang')}>
+    }},
+    "assessment": "<3-5 sentences citing specific evidence from CV>",
+    "strengths": ["strength 1", "strength 2"],
+    "concerns": ["concern 1", "concern 2"],
+    "missing_must_haves": ["missing requirement 1", ...],
+    "nice_to_have_matches": ["matched bonus skill 1", ...],
+    "recommendation": "<STRONG_YES | YES | MAYBE | NO | STRONG_NO>"
+}}"""
+
+    candidate_profile = f"""
+CANDIDATE DATA (ATS):
+Name: {_normalize(candidate_info.get('Full_Name'))}
+Location: {_normalize(candidate_info.get('Country'))}, {_normalize(candidate_info.get('City'))}
+Experience: {_normalize(candidate_info.get('Experience_in_Years'))} years
+Current Title: {_normalize(candidate_info.get('Current_Job_Title'))}
+Employer: {_normalize(candidate_info.get('Current_Employer'))}
+Seniority: {_normalize(candidate_info.get('Current_Seniority'))}
+Skills: {_normalize(candidate_info.get('Skill_Set'))}
+Additional Skills: {_normalize(candidate_info.get('Skills'))}
+Education: {_normalize(candidate_info.get('Highest_Qualification_Held'))}
+English: {_normalize(candidate_info.get('English_Level'))}
+Expected Salary: {_normalize(candidate_info.get('Expected_Salary'))} {_normalize(candidate_info.get('Currency'))}
+Summary: {_normalize(candidate_info.get('Professional_Sumarry'))}
+
+CV/RESUME:
+{cv_text if cv_text else 'No CV provided - evaluate based on ATS data only'}"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": candidate_profile}
+            ],
+            temperature=0.1,
             max_tokens=1500,
             response_format={"type": "json_object"}
         )
 
         result = json.loads(resp.choices[0].message.content)
-        
-        # ✅ Score-ს ვთვლით breakdown-იდან!
-        breakdown = result.get('breakdown', {})
-        
-        technical = int(breakdown.get('technical_skills', 0))
-        experience = int(breakdown.get('experience', 0))
-        edu_lang = int(breakdown.get('education_language', 0))
-        culture = int(breakdown.get('culture_fit', 0))
-        
-        # გამოთვლილი score
-        calculated_score = technical + experience + edu_lang + culture
-        
-        # Validation: არ უნდა გასცდეს მაქსიმუმებს
-        if technical > 40:
-            technical = 40
-        if experience > 30:
-            experience = 30
-        if edu_lang > 15:
-            edu_lang = 15
-        if culture > 15:
-            culture = 15
-        
-        calculated_score = technical + experience + edu_lang + culture
-        
-        # თუ AI-მაც მოგვცა score, შევადაროთ
-        ai_score = result.get('score')
-        if ai_score is not None:
-            print(f"[OpenAI] AI gave score: {ai_score} | Calculated from breakdown: {calculated_score}")
-        else:
-            print(f"[OpenAI] Calculated score from breakdown: {calculated_score}")
-        
-        # ✅ საბოლოო score = გამოთვლილი breakdown-იდან
-        score_val = calculated_score
-        
-        # Assessment-ის აგება
-        assessment_parts = []
-        
-        # Main assessment
-        assessment_parts.append(result.get('assessment', 'No assessment provided.'))
-        
-        # Recommendation
-        recommendation = result.get('recommendation', 'N/A')
-        assessment_parts.append(f"\n\n📊 Recommendation: {recommendation}")
-        
-        # Score breakdown
-        assessment_parts.append(
-            f"\n\n📈 Score Breakdown ({calculated_score}/100):\n"
-            f"• Technical Skills: {technical}/40\n"
-            f"• Experience: {experience}/30\n"
-            f"• Education & Language: {edu_lang}/15\n"
-            f"• Culture Fit: {culture}/15"
+        breakdown = result.get("breakdown", {})
+
+        technical = min(int(breakdown.get("technical", 0)), weights.get("technical", 40))
+        experience = min(int(breakdown.get("experience", 0)), weights.get("experience", 30))
+        edu_lang = min(int(breakdown.get("edu_lang", 0)), weights.get("edu_lang", 30))
+
+        score_val = technical + experience + edu_lang
+        score_val = max(0, min(100, score_val))
+
+        recommendation = result.get("recommendation", "N/A")
+        print(f"[Score] {score_val}/100 | {recommendation}")
+        print(f"[Score] T={technical}/{weights.get('technical')} E={experience}/{weights.get('experience')} EL={edu_lang}/{weights.get('edu_lang')}")
+
+        # Assessment აგება
+        parts = [result.get("assessment", "No assessment provided.")]
+        parts.append(f"\n\nRecommendation: {recommendation}")
+        parts.append(
+            f"\n\nScore Breakdown ({score_val}/100):\n"
+            f"- Technical Skills: {technical}/{weights.get('technical')}\n"
+            f"- Experience: {experience}/{weights.get('experience')}\n"
+            f"- Education & Language: {edu_lang}/{weights.get('edu_lang')}"
         )
-        
-        # Strengths
-        strengths = result.get('strengths', [])
+
+        strengths = result.get("strengths", [])
         if strengths:
-            assessment_parts.append(f"\n\n✅ Strengths:\n• " + "\n• ".join(strengths))
-        
-        # Concerns
-        concerns = result.get('concerns', [])
+            parts.append("\n\nStrengths:\n- " + "\n- ".join(strengths))
+
+        concerns = result.get("concerns", [])
         if concerns:
-            assessment_parts.append(f"\n\n⚠️ Concerns:\n• " + "\n• ".join(concerns))
-        
-        # Missing requirements
-        missing = result.get('missing_must_haves', [])
+            parts.append("\n\nConcerns:\n- " + "\n- ".join(concerns))
+
+        missing = result.get("missing_must_haves", [])
         if missing:
-            assessment_parts.append(f"\n\n❌ Missing Requirements:\n• " + "\n• ".join(missing))
-        
-        full_assessment = "".join(assessment_parts)
-        
-        print(f"[OpenAI] Final score: {score_val}")
-        print(f"[OpenAI] Breakdown: T={technical}, E={experience}, EL={edu_lang}, C={culture}")
-        
-        return score_val, full_assessment
+            parts.append("\n\nMissing Requirements:\n- " + "\n- ".join(missing))
+
+        nice_matches = result.get("nice_to_have_matches", [])
+        if nice_matches:
+            parts.append("\n\nBonus Skills (nice-to-have, not scored):\n- " + "\n- ".join(nice_matches))
+
+        return score_val, "".join(parts)
 
     except json.JSONDecodeError as e:
-        print(f"[OpenAI] JSON error: {e}")
+        print(f"[Score] JSON error: {e}")
         return 0, f"Error parsing AI response: {str(e)}"
-    
     except Exception as e:
-        print(f"[OpenAI] Error: {e}")
+        print(f"[Score] Error: {e}")
         return 0, f"AI scoring error: {str(e)}"
+
+
+# ─────────────────────────────────────────────
+# Main entry point (called from app.py)
+# ─────────────────────────────────────────────
+
+def score(cv_text, jd_text, icp_text, job_info, candidate_info, job_id=None):
+    """
+    Main function: generates rubric (cached) then scores candidate.
+    """
+    rubric = generate_rubric(jd_text, icp_text, job_info, job_id=job_id)
+    return score_candidate(cv_text, rubric, candidate_info)
