@@ -114,14 +114,41 @@ def screen():
             print("[5] No documents found, using ATS data only")
             cv_text = _build_fallback_cv(candidate)
 
-        # 6. Get JD/ICP
-        print("[6] Downloading JD/ICP...")
+        # 6. English level check (ATS-დან)
+        english_level = (candidate.get('English_Level') or '').strip()
+        print(f"[6] English level (ATS): '{english_level}'")
+
+        if english_level and _is_below_b2(english_level):
+            print(f"[6] Auto-reject: English level {english_level} is below B2")
+            assessment = (
+                f"Automatically rejected: English proficiency level is {english_level}, "
+                f"which is below the minimum required level (B2). "
+                f"Only candidates with B2 or higher English level are accepted."
+            )
+            final_status = zoho_api.auto_reject_candidate(cid, jid, assessment)
+            return jsonify({
+                'status': 'success',
+                'data': {
+                    'candidate': name,
+                    'job': job_title,
+                    'score': 0,
+                    'assessment': assessment,
+                    'status': final_status,
+                    'rejection_reason': 'english_level',
+                    'english_level': english_level
+                }
+            }), 200
+
+        print(f"[6] English level OK: {english_level or 'not specified in ATS — will check from CV'}")
+
+        # 7. Get JD/ICP
+        print("[7] Downloading JD/ICP...")
         jd_text, icp_text = zoho_api.get_job_documents(jid)
         if not jd_text:
             jd_text = job.get('Job_Description', '')
-        print(f"[6] JD: {len(jd_text) if jd_text else 0} chars | ICP: {len(icp_text) if icp_text else 0} chars")
+        print(f"[7] JD: {len(jd_text) if jd_text else 0} chars | ICP: {len(icp_text) if icp_text else 0} chars")
 
-        # 7. AI Scoring (rubric cached per job_id)
+        # 8. AI Scoring (rubric cached per job_id)
         print("[7] AI Scoring...")
         score_val, assessment = openai_service.score(
             cv_text=cv_text,
@@ -131,16 +158,16 @@ def screen():
             candidate_info=candidate,
             job_id=jid
         )
-        print(f"[7] Score: {score_val}%")
+        print(f"[8] Score: {score_val}%")
 
-        # 8. Country check — AFTER scoring
+        # 9. Country check — AFTER scoring
         # თუ restricted ქვეყანაა: 60+ → Associated, 0-59 → Rejected
         if country in config.AUTO_REJECT_COUNTRIES:
-            print(f"[8] Restricted country: {country_raw} | Score: {score_val}")
+            print(f"[9] Restricted country: {country_raw} | Score: {score_val}")
 
             if score_val >= config.SAVE_FOR_FUTURE_THRESHOLD:
                 # 60+ → Associated მიუხედავად ქვეყნისა
-                print(f"[8] Score {score_val} >= 60 → Associated (country exception)")
+                print(f"[9] Score {score_val} >= 60 → Associated (country exception)")
                 zoho_api.update_candidate_fields(cid, {
                     'AI_Score': int(score_val),
                     'AI_Assessment': assessment[:5000]
@@ -163,7 +190,7 @@ def screen():
 
             else:
                 # 0-59 → Rejected (ქვეყნის + სუსტი score)
-                print(f"[8] Score {score_val} < 60 → Rejected (restricted country + weak score)")
+                print(f"[9] Score {score_val} < 60 → Rejected (restricted country + weak score)")
                 country_note = f"\n\nNote: Candidate is located in {country_raw}, which is outside the target geography. Additionally, the match score ({score_val}%) is below the required threshold (60%)."
                 full_assessment = assessment + country_note
 
@@ -186,8 +213,8 @@ def screen():
                     }
                 }), 200
 
-        # 9. Regular scoring result (non-restricted country)
-        print("[9] Applying result...")
+        # 10. Regular scoring result (non-restricted country)
+        print("[10] Applying result...")
         final_status = zoho_api.apply_screening_result(cid, jid, score_val, assessment)
         if not final_status:
             final_status = current_status
@@ -212,7 +239,29 @@ def screen():
         return jsonify({'error': str(e)}), 500
 
 
-def _build_fallback_cv(candidate):
+def _is_below_b2(level: str) -> bool:
+    """
+    Returns True if English level is below B2.
+    Handles CEFR format (A1, A2, B1, B2, C1, C2).
+    B2, C1, C2 → OK (returns False)
+    A1, A2, B1 → below B2 (returns True)
+    Unknown format → False (გაატარებს, AI შეაფასებს)
+    """
+    normalized = level.strip().upper().replace(' ', '')
+    below_b2 = {'A1', 'A2', 'B1'}
+    acceptable = {'B2', 'C1', 'C2'}
+
+    if normalized in below_b2:
+        return True
+    if normalized in acceptable:
+        return False
+
+    # სხვა ფორმატები (Intermediate, Advanced...) — AI-ზე გადადის
+    print(f"[English] Non-CEFR format '{level}' — skipping hard reject, AI will evaluate")
+    return False
+
+
+
     return f"""Candidate Profile:
 
 Name: {candidate.get('Full_Name', 'N/A')}
