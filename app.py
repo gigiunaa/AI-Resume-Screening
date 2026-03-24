@@ -8,6 +8,15 @@ import traceback
 app = Flask(__name__)
 
 
+def safe_str(value, default=''):
+    """Convert Zoho field value to string, handling lists."""
+    if value is None:
+        return default
+    if isinstance(value, list):
+        return ', '.join(str(v) for v in value) if value else default
+    return str(value)
+
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'alive'}), 200
@@ -34,10 +43,10 @@ def screen():
         # 1. Get Candidate
         print("[1] Getting candidate...")
         candidate = zoho_api.get_candidate(cid)
-        name = candidate.get('Full_Name', 'Unknown')
-        current_status = candidate.get('Candidate_Status', 'Unknown')
-        country_raw = candidate.get('Country', '')
-        country = (country_raw or '').strip().lower()
+        name = safe_str(candidate.get('Full_Name'), 'Unknown')
+        current_status = safe_str(candidate.get('Candidate_Status'), 'Unknown')
+        country_raw = safe_str(candidate.get('Country'), '')
+        country = country_raw.strip().lower()
 
         print(f"[1] Name: {name}")
         print(f"[1] Status: {current_status}")
@@ -58,7 +67,7 @@ def screen():
 
         print(f"[3] Getting job {jid}...")
         job = zoho_api.get_job_opening(jid)
-        job_title = job.get('Posting_Title', 'Unknown')
+        job_title = safe_str(job.get('Posting_Title'), 'Unknown')
         print(f"[3] Job: {job_title}")
 
         # 4. Get all candidate documents
@@ -115,7 +124,11 @@ def screen():
             cv_text = _build_fallback_cv(candidate)
 
         # 6. English level check (ATS-დან)
-        english_level = (candidate.get('English_Level') or '').strip()
+        raw_english = candidate.get('English_Level') or ''
+        if isinstance(raw_english, list):
+            english_level = raw_english[0].strip() if raw_english else ''
+        else:
+            english_level = raw_english.strip()
         print(f"[6] English level (ATS): '{english_level}'")
 
         if english_level and _is_below_b2(english_level):
@@ -145,11 +158,11 @@ def screen():
         print("[7] Downloading JD/ICP...")
         jd_text, icp_text = zoho_api.get_job_documents(jid)
         if not jd_text:
-            jd_text = job.get('Job_Description', '')
+            jd_text = safe_str(job.get('Job_Description'), '')
         print(f"[7] JD: {len(jd_text) if jd_text else 0} chars | ICP: {len(icp_text) if icp_text else 0} chars")
 
         # 8. AI Scoring (rubric cached per job_id)
-        print("[7] AI Scoring...")
+        print("[8] AI Scoring...")
         score_val, assessment = openai_service.score(
             cv_text=cv_text,
             jd_text=jd_text,
@@ -261,19 +274,32 @@ def _is_below_b2(level: str) -> bool:
     return False
 
 
+def _build_fallback_cv(candidate):
+    """Build a fallback CV text from ATS candidate data when no documents are available."""
+    raw_english = candidate.get('English_Level', 'N/A')
+    if isinstance(raw_english, list):
+        english_display = ', '.join(str(v) for v in raw_english) if raw_english else 'N/A'
+    else:
+        english_display = raw_english or 'N/A'
+
+    raw_skills = candidate.get('Skill_Set', 'N/A')
+    if isinstance(raw_skills, list):
+        skills_display = ', '.join(str(v) for v in raw_skills) if raw_skills else 'N/A'
+    else:
+        skills_display = raw_skills or 'N/A'
 
     return f"""Candidate Profile:
 
-Name: {candidate.get('Full_Name', 'N/A')}
-Current Title: {candidate.get('Current_Job_Title', 'N/A')}
-Experience: {candidate.get('Experience_in_Years', 'N/A')} years
-Skills: {candidate.get('Skill_Set', 'N/A')}
-Education: {candidate.get('Highest_Qualification_Held', 'N/A')}
-English Level: {candidate.get('English_Level', 'N/A')}
-Country: {candidate.get('Country', 'N/A')}
+Name: {safe_str(candidate.get('Full_Name'), 'N/A')}
+Current Title: {safe_str(candidate.get('Current_Job_Title'), 'N/A')}
+Experience: {safe_str(candidate.get('Experience_in_Years'), 'N/A')} years
+Skills: {skills_display}
+Education: {safe_str(candidate.get('Highest_Qualification_Held'), 'N/A')}
+English Level: {english_display}
+Country: {safe_str(candidate.get('Country'), 'N/A')}
 
 Professional Summary:
-{candidate.get('Professional_Sumarry', 'N/A')}
+{safe_str(candidate.get('Professional_Sumarry'), 'N/A')}
 """
 
 
